@@ -78,6 +78,8 @@ dom0:00_01.1-00_00.0   # VGA (BDF 01:00.0)
 dom0:00_01.1-00_00.1   # HD audio (BDF 01:00.1)
 ```
 
+Your hierarchical paths and BDFs will differ; use the output of `qvm-pci` on your system.
+
 If the GPU shares an IOMMU group with unrelated devices, you may need an ACS override — but a card on a dedicated CPU root port usually does not.
 
 ---
@@ -110,7 +112,7 @@ A **StandaloneVM** keeps the driver and the patch self-contained (apt/dkms chang
 ```bash
 qvm-prefs sys-gpu virt_mode hvm
 qvm-prefs sys-gpu kernel ''        # qube boots its own in-VM kernel — critical for dkms to build the right module
-qvm-prefs sys-gpu memory 3400      # see §10 for the >3.5 GB ceiling
+qvm-prefs sys-gpu memory 3400      # deliberately under the ~3584 MB ceiling (see §10)
 qvm-prefs sys-gpu maxmem 0         # disable ballooning
 qvm-prefs sys-gpu qrexec_timeout 1200   # generous cushion (see §8)
 ```
@@ -153,6 +155,8 @@ This is the whole ballgame.
 
 **Why it crashes:** During init the NVIDIA driver writes to PCI config **offset 4** (the Command register) via `os_pci_write_dword`. The Xen MSI-X stubdomain patch ("Save back data only for declared registers") rejects writes to undeclared registers, including offset 4. The driver doesn't handle the rejection and reports `Xid 79 / NV_ERR_GPU_IS_LOST` — "fallen off the bus." Historically only the *proprietary* driver made this write; **nvidia-open 610 has regressed into making it too**, so the open driver now needs the same fix.
 
+> **Scope warning:** only apply this guard in a Qubes/Xen PCI-passthrough qube. Skipping the Command-register write on bare metal or another hypervisor would prevent the driver from enabling memory/IO/bus-master decoding via config space.
+
 Find the source file:
 
 ```bash
@@ -165,7 +169,7 @@ Edit `os_pci_write_dword` so it declines the offset-4 write. The function return
 ```diff
      if (offset >= NV_PCIE_CFG_MAX_OFFSET)
          return NV_ERR_NOT_SUPPORTED;
- 
+
 +    /* Xen stubdom rejects writes to the PCI Command register (offset 4);
 +     * issuing it makes the GPU fall off the bus under passthrough. Decline it. */
 +    if (offset == 4)
@@ -219,9 +223,10 @@ NVIDIA RTX 6000 Ada Generation   46068MiB   P8   13W / 300W   0%
 - **You do not need a working GPU to patch the driver.** Building the module is a pure compile against kernel headers. Do all driver work with the card detached, attach last.
 - **The "Transient" / qrexec trap.** If you boot with the GPU attached and an *unpatched* driver, the driver hangs init for ~50 s before the card falls off, which blows past the default 60 s qrexec timeout. The qube sits in **Transient** state — and you **cannot open a terminal** in a Transient qube. Raising `qrexec_timeout` doesn't help if the wedged init means qrexec never connects. Conclusion: patch first, attach last.
 - **`qvm-pci detach` says "not attached" on a halted qube.** On a stopped qube the device is *assigned* (persistent), not *attached*; `detach` operates on live attachments. Also watch BDF (`01_00.0`) vs hierarchical (`00_01.1-00_00.0`) notation mismatches.
-- **The clean way to free a stuck assignment:** `qvm-remove`-ing the qube releases its device assignments back to the free pool. Recreating the qube sidesteps detach entirely.
-- **A wedged GPU can block domain start.** If a qube won't start because the card is in a fallen-off state, reboot dom0 to cold-reset it (this also clears any stale `vm-*-volatile` LVs, another symptom of hard kills: `sudo lvremove -f qubes_dom0/vm-<name>-volatile`).
+- **Last-resort way to free a stuck assignment:** `qvm-remove`-ing the qube releases its device assignments back to the free pool, but it also **deletes the qube and its data**. Back up anything important first; only use this if normal detach/reattach fails.
+- **A wedged GPU can block domain start.** If a qube won't start because the card is in a fallen-off state, reboot dom0 to cold-reset it. After a hard kill you may also see stale `vm-*-volatile` LVs; these can be removed with `sudo lvremove -f qubes_dom0/vm-<name>-volatile`, but that is a **destructive dom0 command** — use it only as a last resort.
 - **`/sys/kernel/iommu_groups` is empty on Qubes.** Xen owns the IOMMU; use `lspci -tv` and `qvm-pci`.
+- **Secure Boot / module signing.** If the HVM has UEFI Secure Boot enabled, the rebuilt `nvidia` module will be rejected as unsigned. Either disable Secure Boot for the qube or sign the module with a key enrolled in the VM's MOK.
 
 ---
 
@@ -234,8 +239,20 @@ The fix patches **driver source**, so it must be re-applied and rebuilt on every
 set -e
 SRC=$(find /usr/src -iname os-pci.c -path '*kernel-open*' | head -1)
 MOD=$(sudo dkms status | sed -n 's/^\(nvidia\/[0-9.]*\),.*/\1/p' | head -1)
-grep -q 'offset == 4' "$SRC" || sudo sed -i \
-  's/\(\s*\)\(pci_write_config_dword(\)/\1if (offset == 4)\n\1    return NV_ERR_NOT_SUPPORTED;\n\1\2/' "$SRC"
+
+if ! grep -q 'if (offset == 4)' "$SRC"; then
+    sudo sed -i \
+      's/\(\s*\)\(pci_write_config_dword(\)/\1if (offset == 4)\n\1    return NV_ERR_NOT_SUPPORTED;\n\1\2/' "$SRC"
+fi
+
+# Fail loudly if the patch landed in zero or multiple places
+count=$(grep -c 'if (offset == 4)' "$SRC")
+if [ "$count" -ne 1 ]; then
+    echo "ERROR: found $count occurrences of the offset-4 guard; expected exactly 1." >&2
+    echo "Revert $SRC and inspect it before rebuilding." >&2
+    exit 1
+fi
+
 sudo dkms build  "$MOD" -k "$(uname -r)" --force
 sudo dkms install "$MOD" -k "$(uname -r)" --force
 ```
