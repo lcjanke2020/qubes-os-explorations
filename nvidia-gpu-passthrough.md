@@ -29,7 +29,7 @@ Credit for the original diagnosis goes to **neowutran** — see <https://neowutr
 | Guest | Debian 13 (Trixie), StandaloneVM, HVM |
 | Driver | `nvidia-open` 610.43.02 (NVIDIA CUDA repo for debian13) |
 
-The approach generalizes to any recent NVIDIA card (40-/50-series, Ada/Blackwell workstation parts) that exhibits the `Xid 79` fall-off under Qubes.
+> **Scope — what we actually tested.** Everything below was verified on exactly the one board + GPU combination in the table above, on an **AMD** platform. That single combo is the whole of what we can vouch for. The offset-4 fall-off is a Qubes/Xen-stubdomain behavior rather than something board-specific, so we'd *expect* it to carry over to other recent NVIDIA cards (40-/50-series, Ada/Blackwell workstation parts) and to other AMD boards that hit the same `Xid 79` — but we haven't tested those, so that's a reasoned expectation, not a guarantee. We make **no claim at all about Intel** platforms; we never ran one, and we're not going to guess. Treat anything outside the table as unverified. This guide does build on prior findings from others who hit the same wall — see neowutran's writeup and the qubes-issues threads credited below.
 
 ---
 
@@ -58,6 +58,8 @@ Confirm the IOMMU is on:
 ```bash
 sudo xl dmesg | grep -i AMD-Vi      # "AMD-Vi: IOMMU 0 Enabled" — the 0 is an index, not an error
 ```
+
+`AMD-Vi` is what our AMD platform logs; an Intel host would print `DMAR` lines instead (`grep -i DMAR`). We only call that out so the grep above doesn't read as a false negative — per the scope note, Intel itself is untested here.
 
 Inspect the topology and confirm the GPU sits on its own root port, cleanly isolated from other devices (no shared bridge with NICs, NVMe, USB, etc.):
 
@@ -236,9 +238,13 @@ The fix patches **driver source**, so it must be re-applied and rebuilt on every
 
 ```bash
 #!/bin/bash
-set -e
-SRC=$(find /usr/src /var/lib/dkms -iname os-pci.c -path '*kernel-open*' 2>/dev/null | head -1)
-MOD=$(sudo dkms status | sed -n 's/^\(nvidia\/[0-9.]*\),.*/\1/p' | head -1)
+set -euo pipefail
+# The two discovery pipelines end in `head -1`, which can raise SIGPIPE upstream
+# and — under pipefail — abort before the empty-checks below can print a useful
+# message. Let them fall through with `|| true`; the `-z` guards are the intended
+# loud failure for "found nothing".
+SRC=$(find /usr/src /var/lib/dkms -iname os-pci.c -path '*kernel-open*' 2>/dev/null | head -1 || true)
+MOD=$(sudo dkms status 2>/dev/null | sed -n 's/^\(nvidia\/[0-9.]*\),.*/\1/p' | head -1 || true)
 
 # Bail out if either lookup came up empty, instead of feeding "" to sed/dkms
 # (which fails with a confusing error and could touch the wrong file).
@@ -256,8 +262,10 @@ if ! grep -q 'if (offset == 4)' "$SRC"; then
       's/\(\s*\)\(pci_write_config_dword(\)/\1if (offset == 4)\n\1    return NV_ERR_NOT_SUPPORTED;\n\1\2/' "$SRC"
 fi
 
-# Fail loudly if the patch landed in zero or multiple places
-count=$(grep -c 'if (offset == 4)' "$SRC")
+# Fail loudly if the patch landed in zero or multiple places. `grep -c` exits
+# non-zero on zero matches, so `|| true` keeps `set -e` from aborting here before
+# the count check below can report it.
+count=$(grep -c 'if (offset == 4)' "$SRC" || true)
 if [ "$count" -ne 1 ]; then
     echo "ERROR: found $count occurrences of the offset-4 guard; expected exactly 1." >&2
     echo "Revert $SRC and inspect it before rebuilding." >&2
