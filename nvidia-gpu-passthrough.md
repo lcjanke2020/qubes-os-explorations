@@ -22,7 +22,7 @@ Credit for the original diagnosis goes to **neowutran** — see <https://neowutr
 
 | Component | Value |
 |---|---|
-| Host board | ASUS ROG Crosshair X870E (AMD X870E, AM5) |
+| Host board | ASUS ROG Crosshair X870E Glacial (AMD X870E, AM5) |
 | Passthrough GPU | NVIDIA RTX 6000 Ada Generation (AD102GL, 48 GB) |
 | dom0 display GPU | AMD iGPU (Granite Ridge) |
 | Hypervisor | Qubes OS 4.x / Xen |
@@ -237,8 +237,19 @@ The fix patches **driver source**, so it must be re-applied and rebuilt on every
 ```bash
 #!/bin/bash
 set -e
-SRC=$(find /usr/src -iname os-pci.c -path '*kernel-open*' | head -1)
+SRC=$(find /usr/src /var/lib/dkms -iname os-pci.c -path '*kernel-open*' 2>/dev/null | head -1)
 MOD=$(sudo dkms status | sed -n 's/^\(nvidia\/[0-9.]*\),.*/\1/p' | head -1)
+
+# Bail out if either lookup came up empty, instead of feeding "" to sed/dkms
+# (which fails with a confusing error and could touch the wrong file).
+if [ -z "$SRC" ]; then
+    echo "ERROR: no os-pci.c found under /usr/src or /var/lib/dkms — is nvidia-open installed?" >&2
+    exit 1
+fi
+if [ -z "$MOD" ]; then
+    echo "ERROR: 'dkms status' reported no nvidia module to rebuild." >&2
+    exit 1
+fi
 
 if ! grep -q 'if (offset == 4)' "$SRC"; then
     sudo sed -i \
