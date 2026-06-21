@@ -1,8 +1,8 @@
 # Locking Down Qube Outbound: LAN Peers Reachable Only Over the Tailnet
 
 *A field guide for Qubes OS app qubes that run Tailscale **inside** the qube. Goal: other
-devices on the physical LAN can be reached **only** over the tailnet (the `100.x` CGNAT range),
-never via their raw LAN IPs — so no plaintext LAN path exists and all peer traffic rides
+devices on the physical LAN can be reached **only** over the tailnet (the `100.64.0.0/10` CGNAT
+range, i.e. `100.x`), never via their raw LAN IPs — so no plaintext LAN path exists and all peer traffic rides
 authenticated, encrypted WireGuard. Reproduced end-to-end on Qubes OS 4.x with Tailscale running
 in Debian- and Fedora-based app qubes. The drop recipe below is **IPv4**; IPv6 is handled
 explicitly in §4.*
@@ -59,7 +59,8 @@ Everything a locked-down qube reaches on the LAN must therefore go by its tailne
 
 The qube itself sits on a Qubes-internal `10.137.x/10.138.x` network behind `sys-net`'s NAT, so
 the physical LAN subnet isn't visible from inside the qube. Read it from `sys-net`'s upstream
-(WAN) interface in dom0 — derive the interface from the default route so you don't guess among
+(WAN) interface — run the following from dom0 (the `ip` commands execute *inside* `sys-net` via
+`qvm-run`), deriving the WAN interface from the default route so you don't guess among
 loopback/Qubes-internal interfaces:
 
 ```bash
@@ -141,9 +142,12 @@ qvm-features sys-firewall ipv6 ; qvm-features sys-net ipv6
 qvm-run --pass-io --user root <qube> 'ip -6 route show default'
 
 # 3) Confirm egress with a TCP (not ICMP) probe — ICMPv6 may be filtered while TCP/UDP v6 still
-#    routes, so don't decide on a v6 ping alone:
+#    routes, so don't decide on a v6 ping alone. NB: pass the IPv6 literal WITHOUT brackets —
+#    bash's /dev/tcp rejects the bracketed [..] form (it fails name resolution before connecting,
+#    so a bracketed probe would always print "no" even with v6 egress). Port 443 dodges TCP/53
+#    filtering:
 qvm-run --pass-io --user root <qube> \
-  'timeout 5 bash -c "exec 3<>/dev/tcp/[2606:4700:4700::1111]/53" && echo "v6 egress: YES" || echo "v6 egress: no"'
+  'timeout 5 bash -c "exec 3<>/dev/tcp/2606:4700:4700::1111/443" && echo "v6 egress: YES" || echo "v6 egress: no"'
 ```
 
 **If the qube has no v6 default route** (the Qubes default): its only non-link-local IPv6 is
@@ -183,8 +187,8 @@ it, so pin the rule to the stable ULA and re-check the GUA after prefix changes.
   the LAN router.)
 
 - **Same-LAN tailnet peers lose their *direct* path → fall back to DERP.** Tailscale's fast
-  direct route to a peer that's on the same physical LAN uses that peer's `192.168.x` endpoint as
-  the WireGuard underlay. Dropping the LAN subnet drops that too, so traffic to same-LAN peers
+  direct route to a peer that's on the same physical LAN uses that peer's address inside your
+  physical LAN CIDR (e.g. `192.168.1.x`) as the WireGuard underlay. Dropping the LAN subnet drops that too, so traffic to same-LAN peers
   reroutes through a DERP relay — still encrypted and "over the tailnet," but with added latency
   and a dependence on reaching the relay. This is the **perf-vs-purity trade-off**: it's the
   intended cost of guaranteeing no plaintext LAN path. (Allowing a specific peer's LAN IP back in
