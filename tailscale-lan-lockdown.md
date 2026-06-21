@@ -133,20 +133,25 @@ check before you act.
 **Check (dom0 + the qube):**
 
 ```bash
-# Is IPv6 forwarding to qubes even enabled? Empty output = feature off = no v6 LAN path.
+# 1) Is IPv6 forwarding to qubes even enabled? Empty output = feature off = no v6 LAN path.
 qvm-features sys-firewall ipv6 ; qvm-features sys-net ipv6
 
-# Does the qube actually have routed v6 egress? (a v6 default route AND a real v6 ping)
-qvm-run --pass-io --user root <qube> 'ip -6 route show default; \
-  ping -6 -c1 -W3 2606:4700:4700::1111 >/dev/null 2>&1 && echo "v6 egress: YES" || echo "v6 egress: no"'
+# 2) AUTHORITATIVE signal: does the qube have a v6 DEFAULT ROUTE? If it does, Qubes is routing v6
+#    to it — whether or not ICMPv6 happens to be permitted.
+qvm-run --pass-io --user root <qube> 'ip -6 route show default'
+
+# 3) Confirm egress with a TCP (not ICMP) probe — ICMPv6 may be filtered while TCP/UDP v6 still
+#    routes, so don't decide on a v6 ping alone:
+qvm-run --pass-io --user root <qube> \
+  'timeout 5 bash -c "exec 3<>/dev/tcp/[2606:4700:4700::1111]/53" && echo "v6 egress: YES" || echo "v6 egress: no"'
 ```
 
-**If the qube has no v6 default route / no v6 egress** (the Qubes default): its only global IPv6 is
-Tailscale's own range (`fd7a:115c:a1e0::/48`, carried inside `tailscale0`), plus link-local on the
-netvm link. **There is no raw IPv6 LAN path, and the §3 IPv4 drop is sufficient.** (`sys-net`
-itself often *does* have full IPv6 from the router — that's fine; what matters is whether the
-*qube* routes it.) This is contingent on the `ipv6` feature staying off — **re-check if you ever
-enable Qubes IPv6.**
+**If the qube has no v6 default route** (the Qubes default): its only non-link-local IPv6 is
+Tailscale's ULA range (`fd7a:115c:a1e0::/48`, carried inside `tailscale0`); everything else is
+link-local (`fe80::`) on the netvm link. **There is no raw IPv6 LAN path, and the §3 IPv4 drop is
+sufficient.** (`sys-net` itself often *does* have full IPv6 from the router — that's fine; what
+matters is whether the *qube* routes it.) This is contingent on the `ipv6` feature staying off —
+**re-check if you ever enable Qubes IPv6.**
 
 **If the qube does route IPv6**, discover the LAN's v6 prefix(es) on `sys-net` and drop the
 **specific** ones, mirroring §3:
@@ -157,6 +162,10 @@ qvm-run --pass-io --user root sys-net 'ip -6 -o addr show scope global'
 
 qvm-firewall <qube> add --before 0 action=drop dsthost=2001:db8:abcd:1234::/64
 qvm-firewall <qube> add --before 0 action=drop dsthost=fd12:3456:789a::/64
+# if your topology also exposes link-local v6 to LAN neighbors (some bridged/routed setups):
+qvm-firewall <qube> add --before 0 action=drop dsthost=fe80::/10
+
+qvm-firewall <qube> list   # confirm the v6 drops landed at the top, ahead of the accept-all
 ```
 
 **Do not** blanket-drop `fd00::/8` or `::/0`. Tailscale's tunnel range (`fd7a:115c:a1e0::/48`)
@@ -277,13 +286,14 @@ Reading the `tailscale ping` line — **any** of these means the tunnel is healt
 
 ```text
 pong from <peer> (100.x.y.z) via DERP(nyc) in 22ms          # relayed — common for same-LAN peers now
-pong from <peer> (100.x.y.z) via 198.51.100.7:41641 in 9ms  # direct via a NON-LAN endpoint — also fine
+pong from <peer> (100.x.y.z) via <public-ip>:41641 in 9ms   # direct via a NON-LAN endpoint — also fine
 ```
 
 A direct path can still form over a non-LAN endpoint (NAT hairpin, another discovered address), so
 **DERP is the *likely* fallback for same-LAN peers, not a required outcome.** The one line you do
-*not* want is a direct pong via a `192.168.x.y` address — that would mean the LAN underlay is still
-open and the drop didn't fully take.
+*not* want is a direct pong via an address inside your **blocked LAN CIDR** (e.g. `192.168.1.x`, or
+whatever §2 gave you) — that would mean the LAN underlay is still open and the drop didn't fully
+take.
 
 ### Two ways the verification misleads you — don't chase ghosts
 
