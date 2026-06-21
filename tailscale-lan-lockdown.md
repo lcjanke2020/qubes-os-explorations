@@ -57,8 +57,9 @@ Everything a locked-down qube reaches on the LAN must therefore go by its tailne
 
 ## 2. Find your real LAN CIDR (don't assume)
 
-The qube itself sits on a Qubes-internal `10.137.x/10.138.x` network behind `sys-net`'s NAT, so
-the physical LAN subnet isn't visible from inside the qube. Read it from `sys-net`'s upstream
+The qube sits on a Qubes-internal `10.137.x` network behind its netvm's NAT (`sys-firewall` by
+default), which in turn reaches the physical LAN through `sys-net`. So the physical LAN subnet
+isn't visible from inside the qube — read it from `sys-net`'s upstream
 (WAN) interface — run the following from dom0 (the `ip` commands execute *inside* `sys-net` via
 `qvm-run`), deriving the WAN interface from the default route so you don't guess among
 loopback/Qubes-internal interfaces:
@@ -166,8 +167,6 @@ qvm-run --pass-io --user root sys-net 'ip -6 -o addr show scope global'
 
 qvm-firewall <qube> add --before 0 action=drop dsthost=2001:db8:abcd:1234::/64
 qvm-firewall <qube> add --before 0 action=drop dsthost=fd12:3456:789a::/64
-# if your topology also exposes link-local v6 to LAN neighbors (some bridged/routed setups):
-qvm-firewall <qube> add --before 0 action=drop dsthost=fe80::/10
 
 qvm-firewall <qube> list   # confirm the v6 drops landed at the top, ahead of the accept-all
 ```
@@ -176,6 +175,13 @@ qvm-firewall <qube> list   # confirm the v6 drops landed at the top, ahead of th
 lives inside `fd00::/8`, and `::/0` would kill v6 internet (and the v6 underlay) — it's the same
 "drop the LAN, not everything" rule as IPv4. A delegated GUA prefix can rotate when the ISP changes
 it, so pin the rule to the stable ULA and re-check the GUA after prefix changes.
+
+**And do not drop `fe80::/10`.** In the standard routed Qubes topology a qube's link-local only
+reaches its netvm — not LAN neighbors (same as the multicast note in §5) — so there's nothing to
+gain; meanwhile the qube's own v6 default gateway is typically a link-local address on the netvm
+link, so a `fe80::/10` drop would blackhole the gateway (and NDP) and break v6 entirely. (A qube
+*bridged* directly onto the LAN is a different topology — analyze it separately; a blanket
+`fe80::/10` drop still isn't the right tool.)
 
 ---
 
@@ -207,7 +213,8 @@ it, so pin the rule to the stable ULA and re-check the GUA after prefix changes.
   loopback rather than `0.0.0.0` (or `::`), and/or restrict inbound to the tailnet interface in the
   qube's own firewall (a `qubes-firewall-user-script` nft rule like
   `iifname "tailscale0" tcp dport <port> accept`, with no LAN-facing accept). App qubes behind
-  `sys-net`'s NAT have no inbound LAN path anyway, but binding to the tailnet interface makes
+  the `sys-firewall`→`sys-net` NAT chain have no inbound LAN path anyway, but binding to the
+  tailnet interface makes
   "nothing is listening on the LAN side even if reached" explicit, and layering Tailscale ACLs on
   top controls *who* may connect.
 
@@ -282,7 +289,7 @@ tailscale ping --until-direct=false <peer>   # --until-direct=false = report the
                                              # stop, instead of retrying to upgrade to a direct path
 timeout 5 bash -c 'exec 3<>/dev/tcp/<peer-100.x>/<port>'   # a service the tailnet ACL permits
 getent hosts <peer>          # MagicDNS still resolves the name to 100.x
-curl -sS -m6 -o /dev/null -w '%{http_code}\n' https://1.1.1.1/   # internet still up
+curl -sS -m6 -o /dev/null -w '%{http_code}\n' http://1.1.1.1/    # internet still up (plain HTTP — no TLS/DNS confounder)
 getent hosts example.com     # DNS still resolves
 ```
 
