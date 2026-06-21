@@ -68,13 +68,17 @@ loopback/Qubes-internal interfaces:
 qvm-run --pass-io --user root sys-net '
   IFACE=$(ip -4 route show default | awk "{print \$5; exit}")
   echo "WAN iface: $IFACE"
-  ip -4 -o addr show dev "$IFACE"'
+  ip -4 -o addr show dev "$IFACE"
+  ip -4 route show dev "$IFACE" scope link'
 # WAN iface: ens6
-# ens6  inet 192.168.1.10/24 ...     <-- CIDR = 192.168.1.0/24
+# ens6  inet 192.168.1.10/24 ...
+# 192.168.1.0/24 dev ens6 proto kernel scope link src 192.168.1.10   <-- the LAN CIDR, authoritative
 ```
 
-The LAN CIDR is the WAN interface's address with its network prefix (e.g. `192.168.1.10/24`
-→ `192.168.1.0/24`). **Don't hard-code `/24`** — read the actual prefix. If your edge device is
+The `scope link` route line **is** your LAN CIDR (`192.168.1.0/24` above) — read it directly rather
+than hand-deriving the network address from the interface IP, which is error-prone for non-`/24`
+prefixes (a `/23` host like `192.168.1.34/23` sits on `192.168.0.0/23`, not `192.168.1.0/23`).
+**Don't hard-code `/24`.** If your edge device is
 in bridge/AP mode, the relevant subnet is the *upstream* router's, which is what `sys-net`'s
 lease shows.
 
@@ -116,11 +120,12 @@ NO  ACTION  HOST            ...
 If a qube has extra accept rules (e.g. a leftover install-time mirror allowlist), `--before 0`
 still does the right thing: the LAN drop jumps to the very top and the rest are unaffected.
 
-Rules are enforced in `sys-firewall` and take effect **immediately — no reboot.** Rollback is one
-command:
+Rules are enforced in `sys-firewall` and take effect **immediately — no reboot.** Roll back by
+**rule spec**, not `--rule-no 0`: if you later add the §4 IPv6 drops at `--before 0` they shift this
+rule's number down, so matching the spec removes exactly the LAN drop regardless of position:
 
 ```bash
-qvm-firewall <qube> del --rule-no 0
+qvm-firewall <qube> del action=drop dsthost=192.168.1.0/24   # position-independent; repeat per prefix for any v6 drops
 ```
 
 ---
@@ -289,7 +294,7 @@ tailscale ping --until-direct=false <peer>   # --until-direct=false = report the
                                              # stop, instead of retrying to upgrade to a direct path
 timeout 5 bash -c 'exec 3<>/dev/tcp/<peer-100.x>/<port>'   # a service the tailnet ACL permits
 getent hosts <peer>          # MagicDNS still resolves the name to 100.x
-curl -sS -m6 -o /dev/null -w '%{http_code}\n' http://1.1.1.1/    # internet still up (plain HTTP — no TLS/DNS confounder)
+curl -sS -m6 -o /dev/null -w '%{http_code}\n' http://1.1.1.1/    # internet still up (plain HTTP; any code — e.g. 301 — means reachable)
 getent hosts example.com     # DNS still resolves
 ```
 
