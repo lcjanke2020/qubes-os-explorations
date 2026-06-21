@@ -3,8 +3,9 @@
 *A field guide for Qubes OS app qubes that run Tailscale **inside** the qube. Goal: other
 devices on the physical LAN can be reached **only** over the tailnet (the `100.x` CGNAT range),
 never via their raw LAN IPs — so no plaintext LAN path exists and all peer traffic rides
-authenticated, encrypted WireGuard. Verified end-to-end on Qubes OS 4.x with Tailscale running
-in Debian- and Fedora-based app qubes.*
+authenticated, encrypted WireGuard. Reproduced end-to-end on Qubes OS 4.x with Tailscale running
+in Debian- and Fedora-based app qubes. The drop recipe below is **IPv4**; IPv6 is handled
+explicitly in §4.*
 
 ---
 
@@ -19,11 +20,15 @@ qvm-firewall <qube> add --before 0 action=drop dsthost=192.168.1.0/24
 qvm-firewall <qube> list      # confirm the drop is rule 0, ahead of the accept-all
 ```
 
-Two things trip people up, and they're the whole reason this guide exists:
+Three things trip people up, and they're the whole reason this guide exists:
 
 1. **Whitelisting `100.64.0.0/10` would kill Tailscale**, not lock it down (§1).
 2. **A plain `qvm-firewall add` puts the drop in the wrong place** and it silently never
    matches — you need `--before 0` (§3).
+3. **The rule is IPv4-only.** If your qubes also route IPv6 to the LAN, that path stays open until
+   you handle it — check and, if needed, drop the v6 LAN prefixes too (§4).
+
+This assumes the qube is in Qubes' default **allow-all** network posture (§3).
 
 ---
 
@@ -54,11 +59,15 @@ Everything a locked-down qube reaches on the LAN must therefore go by its tailne
 
 The qube itself sits on a Qubes-internal `10.137.x/10.138.x` network behind `sys-net`'s NAT, so
 the physical LAN subnet isn't visible from inside the qube. Read it from `sys-net`'s upstream
-(WAN) interface in dom0:
+(WAN) interface in dom0 — derive the interface from the default route so you don't guess among
+loopback/Qubes-internal interfaces:
 
 ```bash
-qvm-run --pass-io --user root sys-net 'ip -4 route show default; ip -4 -o addr show'
-# default via 192.168.1.1 dev ens6 ...
+qvm-run --pass-io --user root sys-net '
+  IFACE=$(ip -4 route show default | awk "{print \$5; exit}")
+  echo "WAN iface: $IFACE"
+  ip -4 -o addr show dev "$IFACE"'
+# WAN iface: ens6
 # ens6  inet 192.168.1.10/24 ...     <-- CIDR = 192.168.1.0/24
 ```
 
@@ -71,11 +80,14 @@ lease shows.
 
 ## 3. Apply the drop — and why `--before 0` matters
 
-A fresh qube's firewall is a **single `accept`-all rule at position 0** (this is what "allow all
-network access" looks like under the hood). Qubes evaluates rules top-to-bottom, first match
-wins, with an implicit drop only *after* the last rule.
+**This assumes the qube is in allow-all posture.** A fresh qube's firewall is a **single
+`accept`-all rule at position 0** ("allow all network access" checked) — that's what this guide
+targets. If you've already set the qube to **deny-by-default** (allow-all unchecked, only specific
+`accept` rules), the LAN is already unreachable and you don't need this drop; adding one ahead of
+your allowlist would just be redundant.
 
-So if you run the obvious command:
+Qubes evaluates rules top-to-bottom, first match wins, with an implicit drop only *after* the last
+rule. So if you run the obvious command:
 
 ```bash
 qvm-firewall <qube> add action=drop dsthost=192.168.1.0/24      # WRONG placement
@@ -111,7 +123,50 @@ qvm-firewall <qube> del --rule-no 0
 
 ---
 
-## 4. Gotchas
+## 4. IPv6 — check whether it's even in play, then cover it
+
+The drop in §3 matches **IPv4 only**. The guide's promise ("reachable only over the tailnet") is
+false if a qube can also reach the LAN over **IPv6**, so handle v6 explicitly. Good news: in
+**default Qubes, IPv6 is not forwarded to qubes**, so most setups have *no* v6 LAN path to close —
+check before you act.
+
+**Check (dom0 + the qube):**
+
+```bash
+# Is IPv6 forwarding to qubes even enabled? Empty output = feature off = no v6 LAN path.
+qvm-features sys-firewall ipv6 ; qvm-features sys-net ipv6
+
+# Does the qube actually have routed v6 egress? (a v6 default route AND a real v6 ping)
+qvm-run --pass-io --user root <qube> 'ip -6 route show default; \
+  ping -6 -c1 -W3 2606:4700:4700::1111 >/dev/null 2>&1 && echo "v6 egress: YES" || echo "v6 egress: no"'
+```
+
+**If the qube has no v6 default route / no v6 egress** (the Qubes default): its only global IPv6 is
+Tailscale's own range (`fd7a:115c:a1e0::/48`, carried inside `tailscale0`), plus link-local on the
+netvm link. **There is no raw IPv6 LAN path, and the §3 IPv4 drop is sufficient.** (`sys-net`
+itself often *does* have full IPv6 from the router — that's fine; what matters is whether the
+*qube* routes it.) This is contingent on the `ipv6` feature staying off — **re-check if you ever
+enable Qubes IPv6.**
+
+**If the qube does route IPv6**, discover the LAN's v6 prefix(es) on `sys-net` and drop the
+**specific** ones, mirroring §3:
+
+```bash
+qvm-run --pass-io --user root sys-net 'ip -6 -o addr show scope global'
+# a delegated GUA prefix (e.g. 2001:db8:abcd:1234::/64) and/or a ULA (e.g. fd12:3456:789a::/64)
+
+qvm-firewall <qube> add --before 0 action=drop dsthost=2001:db8:abcd:1234::/64
+qvm-firewall <qube> add --before 0 action=drop dsthost=fd12:3456:789a::/64
+```
+
+**Do not** blanket-drop `fd00::/8` or `::/0`. Tailscale's tunnel range (`fd7a:115c:a1e0::/48`)
+lives inside `fd00::/8`, and `::/0` would kill v6 internet (and the v6 underlay) — it's the same
+"drop the LAN, not everything" rule as IPv4. A delegated GUA prefix can rotate when the ISP changes
+it, so pin the rule to the stable ULA and re-check the GUA after prefix changes.
+
+---
+
+## 5. Gotchas
 
 - **Never blanket-block `10.0.0.0/8` or `172.16.0.0/12`.** Qubes' own gateway, inter-qube NAT,
   and DNS live in `10.137.x` / `10.138.x` / `10.139.x`. Block **only** the specific physical LAN
@@ -126,10 +181,18 @@ qvm-firewall <qube> del --rule-no 0
   intended cost of guaranteeing no plaintext LAN path. (Allowing a specific peer's LAN IP back in
   would restore direct speed but reopens a plaintext route — don't, unless you mean to.)
 
+- **Multicast/broadcast discovery is link-scoped — and in standard Qubes it doesn't reach the
+  LAN.** mDNS (`224.0.0.251`, `ff02::fb`), SSDP/WS-Discovery (`239.255.255.250`) and friends are
+  link-local, and a unicast LAN drop doesn't stop a qube from *emitting* them. But a qube's only
+  link is the point-to-point connection to its netvm — **not** the physical LAN segment — and
+  Qubes doesn't forward that multicast onward, so it never reaches LAN devices. Worth knowing only
+  if you ever bridge a qube directly onto the LAN; not a leak in the normal
+  routed-through-`sys-firewall` topology.
+
 - **Complement it on the *inbound* side.** The outbound drop stops the qube from *reaching* the
   LAN; it does nothing about what the qube *exposes*. Bind listeners to the tailnet interface /
-  loopback rather than `0.0.0.0`, and/or restrict inbound to the tailnet interface in the qube's
-  own firewall (a `qubes-firewall-user-script` nft rule like
+  loopback rather than `0.0.0.0` (or `::`), and/or restrict inbound to the tailnet interface in the
+  qube's own firewall (a `qubes-firewall-user-script` nft rule like
   `iifname "tailscale0" tcp dport <port> accept`, with no LAN-facing accept). App qubes behind
   `sys-net`'s NAT have no inbound LAN path anyway, but binding to the tailnet interface makes
   "nothing is listening on the LAN side even if reached" explicit, and layering Tailscale ACLs on
@@ -137,85 +200,121 @@ qvm-firewall <qube> del --rule-no 0
 
 ---
 
-## 5. The enforcement lives in `sys-firewall` — mind the template-upgrade window
+## 6. The enforcement lives in `sys-firewall` — don't assume it's continuous
 
 The drop is enforced in `sys-firewall` (the NetVM), **not inside the locked-down qube itself.**
-That's normal for Qubes, but it has a consequence worth internalizing: the protection is only as
-continuous as `sys-firewall`'s own uptime.
+Qubes implements firewall rules in the net qube, so the protection is only as continuous as that
+qube — and its firewall service — being up.
 
-`sys-firewall` is built from a template that is typically **shared** with other qubes. When you
-update that template, you have to **cycle `sys-firewall`** to pick up the change — it goes down
-and comes back. Around that restart there is a window where the per-qube LAN drop is **not in
-force**: as `sys-firewall` re-initializes and the connected qubes' uplinks return, the raw LAN
-path can be momentarily reachable again before the rules are re-applied.
+`sys-firewall` is built from a template typically **shared** with other qubes; updating that
+template means **cycling `sys-firewall`**. Two things are worth knowing about that window:
 
-If a qube is already compromised, an attacker-controlled process can simply **wait** for exactly
-that window — a template upgrade, a `sys-firewall` restart — and make its LAN reach-out then. Even
-a brief opening can be enough if there is a soft target elsewhere on the LAN.
+- A qube **started while its netvm isn't applying rules fails *closed*** — it simply has no
+  networking. That's the safe direction.
+- The case to think about is a qube that is **already running** through a netvm that briefly
+  cycles. Don't *assume* the per-qube policy is continuous across that event; treat the boundary as
+  potentially open while the net qube or its firewall service is down/restarting. How wide that
+  window is — or whether it opens at all on a given Qubes version — depends on netvm start ordering;
+  this is a risk to design around, not a measured gap.
 
-**So don't treat this as a hermetic seal.** It meaningfully raises the bar — there is no standing
-plaintext LAN path during normal operation — but it does not *eliminate* the risk. The honest
-framing is defense-in-depth: assume the boundary can have gaps, and don't let anything else on the
-LAN depend on this single control.
+Why it matters: a qube that is *already compromised* could wait for exactly such a maintenance
+window to make a LAN reach-out. So treat this as **defense-in-depth, not a hermetic seal** — it
+removes the standing plaintext LAN path in normal operation, but don't let anything else on the LAN
+depend on this single control.
 
-**To close the window during maintenance:** shut down the locked-down qubes (in practice, the ones
-routing through `sys-firewall`) *before* you cycle `sys-firewall` for the template update, and
-start them again only **after** `sys-firewall` is fully back up with its rules re-applied. A qube
-that isn't running can't exploit the gap. The cost is real — downtime plus a deliberate, ordered
-start/restart sequence instead of a casual update — so weigh it against how much you distrust the
-qubes in question.
+**To close the window during maintenance:** shut the locked-down qubes down *before* you cycle
+`sys-firewall`, and start them again only **after** the netvm is back up with rules applied. A qube
+that isn't running can't exploit the gap — at the cost of downtime and a deliberate restart order.
 
 ---
 
-## 6. Verification
+## 7. Verification
 
-From the locked-down qube (run via `qvm-run --user root <qube> '...'` from dom0):
+Run these from the locked-down qube (`qvm-run --user root <qube> '...'` from dom0).
 
-**Negative — the raw LAN path must be gone.** A LAN neighbor's raw IP (and the LAN gateway)
-should time out:
+### Establish a baseline first (or the negative test can false-pass)
+
+A LAN probe that fails *after* the drop only proves something if it **succeeded before** it. If the
+target host was off, had no listener, or firewalled the port anyway, the probe fails identically
+with or without your rule — and you'd wrongly conclude "locked down." Pick a LAN `host:port` you
+know is up (another box's SSH, a NAS UI, the router) and confirm it's reachable **before** applying
+the drop:
 
 ```bash
-# both should fail after the drop:
-timeout 5 bash -c 'exec 3<>/dev/tcp/192.168.1.50/22'   # a LAN device
-ping -c1 -W3 192.168.1.1                                # the LAN gateway
+# BEFORE the --before 0 drop — should SUCCEED (proves there's a real path to test):
+timeout 5 bash -c 'exec 3<>/dev/tcp/<lan-host>/<port>' && echo "reachable (baseline ok)"
 ```
 
-**Positive — the tailnet still works.** Use `tailscale ping` for liveness and a real TCP service
-for the actual path:
+### Negative — the raw LAN path must be gone
+
+After the drop, the same probe should **fail** (a blocked path may present as a timeout *or* an
+immediate "unreachable/prohibited" — either counts):
 
 ```bash
-tailscale ping --until-direct=false <peer>     # expect a pong "via DERP(...)" for same-LAN peers
-timeout 5 bash -c 'exec 3<>/dev/tcp/<peer-100.x>/<port>'   # a service the ACL permits
-getent hosts <peer>            # MagicDNS still resolves the name to 100.x
+timeout 5 bash -c 'exec 3<>/dev/tcp/<lan-host>/<port>' || echo "blocked (good)"
+ping -c1 -W3 <lan-gateway>    # informational only — see the ICMP note below
+```
+
+The **TCP `/dev/tcp` probe is the authoritative test.** ICMP can be filtered or handled differently
+from TCP/UDP by the firewall or the target, so a `ping` result either way isn't conclusive on its
+own.
+
+### Positive — the tailnet still works
+
+The clean criterion is: **the raw LAN path fails AND `tailscale ping` reaches the peer over the
+tunnel.** Don't require a specific underlay path:
+
+```bash
+tailscale ping --until-direct=false <peer>   # --until-direct=false = report the first pong and
+                                             # stop, instead of retrying to upgrade to a direct path
+timeout 5 bash -c 'exec 3<>/dev/tcp/<peer-100.x>/<port>'   # a service the tailnet ACL permits
+getent hosts <peer>          # MagicDNS still resolves the name to 100.x
 curl -sS -m6 -o /dev/null -w '%{http_code}\n' https://1.1.1.1/   # internet still up
-getent hosts example.com       # DNS still resolves
+getent hosts example.com     # DNS still resolves
 ```
 
-**Two ways the verification misleads you — don't chase ghosts:**
+Reading the `tailscale ping` line — **any** of these means the tunnel is healthy:
+
+```text
+pong from <peer> (100.x.y.z) via DERP(nyc) in 22ms          # relayed — common for same-LAN peers now
+pong from <peer> (100.x.y.z) via 198.51.100.7:41641 in 9ms  # direct via a NON-LAN endpoint — also fine
+```
+
+A direct path can still form over a non-LAN endpoint (NAT hairpin, another discovered address), so
+**DERP is the *likely* fallback for same-LAN peers, not a required outcome.** The one line you do
+*not* want is a direct pong via a `192.168.x.y` address — that would mean the LAN underlay is still
+open and the drop didn't fully take.
+
+### Two ways the verification misleads you — don't chase ghosts
 
 - **Kernel ICMP to `100.x` is not a reliable signal.** Plain `ping 100.x.y.z` may fail even when
-  the tunnel is perfectly healthy — many tailnets don't permit ICMP between nodes, and right
-  after you apply the drop there's a brief direct→DERP failover window. Trust
-  `tailscale ping --until-direct=false` (the disco layer) for liveness, not kernel ping.
+  the tunnel is healthy — many tailnets don't permit ICMP between nodes, and there's a brief
+  direct→DERP failover window right after the drop. Trust `tailscale ping` (the disco layer) for
+  liveness.
 - **A "not reachable" TCP result can be a Tailscale ACL, not your firewall.** If `tailscale ping`
-  to a peer pongs but a TCP connection to one of its ports fails, that port is almost certainly
-  gated by your **tailnet ACL policy** (or the peer's own host firewall), not by the LAN drop you
-  just made. Confirm by testing a port/peer the ACL is known to allow.
-
-A clean result: raw-LAN targets time out; `tailscale ping` pongs (via DERP for same-LAN peers);
-an ACL-permitted tailnet service connects; MagicDNS resolves to `100.x`; and general internet +
-DNS are unaffected.
+  pongs but a TCP connection to one of the peer's ports fails, that port is almost certainly gated
+  by your **tailnet ACL policy** (or the peer's host firewall), not by the LAN drop. Confirm with a
+  port/peer the ACL is known to allow.
 
 ---
 
-## 7. Scope — what this was tested on
+## 8. Scope — what this was tested on
 
 - Qubes OS 4.x, firewall enforced in `sys-firewall`, rules set with `qvm-firewall` from dom0.
+- **IPv4** drop recipe. In default Qubes (IPv6 not forwarded to qubes) there is no raw IPv6 LAN
+  path and the IPv4 rule is sufficient; if you enable Qubes IPv6, add the v6 prefix drops from §4.
 - Tailscale installed and running **inside** the app qubes (Debian- and Fedora-based), not on a
   dedicated network qube. The "tunnel is above the firewall" reasoning in §1 is specific to that
   topology.
 - MagicDNS enabled (so tailnet names resolve to `100.x` and the raw LAN path is simply absent).
+- Rules are enforced by whatever netvm the qube **currently** uses (`sys-firewall` here). If you
+  route the qube through a VPN qube or a custom netvm, confirm that netvm actually applies
+  `qvm-firewall` rules before relying on this.
 
 If you instead run Tailscale on a sys-net/sys-vpn–style network qube, the trust boundaries and
 the interface the firewall sees are different — the §1 reasoning would need to be re-derived for
 that layout.
+
+---
+
+*Part of [qubes-os-explorations](README.md) — see the Guides list there for related field notes.*
