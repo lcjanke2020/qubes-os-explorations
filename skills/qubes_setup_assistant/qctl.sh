@@ -101,9 +101,9 @@ fi
 # The declaration is the FIRST executable line of the step (shebang, comments
 # and blank lines skipped) — not merely present somewhere in the file. A
 # declaration buried mid-file would pass a grep but let side effects run
-# before the runtime guard, and one inside a heredoc isn't a declaration at
-# all. It also doubles as the variable the step's own guard preamble reads
-# (SKILL.md "Target guard"), so dispatch-time and runtime read the same line.
+# before the runtime guard. It also doubles as the variable the step's own
+# guard preamble reads (SKILL.md "Target guard"), so dispatch-time and
+# runtime read the same line.
 FIRST_CODE=""
 while IFS= read -r line || [ -n "$line" ]; do
     line="${line#"${line%%[![:space:]]*}"}"      # ltrim
@@ -120,11 +120,20 @@ case "$FIRST_CODE" in
         echo "[qctl] any other code; see SKILL.md 'Target guard'). Regenerate the step and retry."
         rm -f "$DOM0_TMP"; exit 5 ;;
 esac
-# Exactly one declaration: the runtime guard is plain shell and would honor a
-# later reassignment, so a second QCTL_TARGET= line means dispatch could
-# validate one value while review reads another. Refuse the ambiguity.
+# Exactly one QCTL_TARGET= line in the whole file: the runtime guard is plain
+# shell and would honor a later reassignment, so a second bare declaration
+# means dispatch could validate one value while the step runs under another.
+# The count is a plain line-start grep, NOT a shell parse — heredoc payload
+# and other non-executable occurrences count too, deliberately: refusing to
+# parse shell means failing closed (see SKILL.md for the printf workaround
+# when a step must legitimately EMIT a declaration). Prefixed reassignments
+# (export/readonly) aren't counted, but can't repoint the dispatch either:
+# the CLI target stays authoritative and the runtime guard re-validates, so
+# the worst case there is an exit-9 abort, never a wrong-qube run.
 if [ "$(grep -cE '^[[:space:]]*QCTL_TARGET=' "$DOM0_TMP")" -ne 1 ]; then
-    echo "[qctl] TARGET GUARD: ${S}.sh contains more than one QCTL_TARGET declaration — refusing to dispatch."
+    echo "[qctl] TARGET GUARD: ${S}.sh has more than one line beginning with QCTL_TARGET= — refusing to dispatch."
+    echo "[qctl] (Heredoc/example content counts. A step that must emit a declaration should"
+    echo "[qctl] assemble the token instead — see SKILL.md 'Target guard'.)"
     rm -f "$DOM0_TMP"; exit 5
 fi
 # Bare value only: strip an optional trailing comment and trailing whitespace,
@@ -134,7 +143,15 @@ fi
 # name, which is exactly what a guard must not do. Anything but a clean bare
 # token fails closed.
 TGT="${FIRST_CODE#QCTL_TARGET=}"
-TGT="${TGT%%#*}"
+# Strip a trailing comment only where bash itself would start one: '#' opens
+# a comment at the beginning of a word (after whitespace), never inside the
+# assignment value. QCTL_TARGET=web#bad assigns 'web#bad' at runtime —
+# parsing it as 'web' here would re-open the dispatch/runtime divergence this
+# guard exists to close, so the '#' falls through to the charset check below
+# and is refused as malformed instead.
+case "$TGT" in
+    *[[:space:]]"#"*) TGT="${TGT%%[[:space:]]"#"*}" ;;
+esac
 TGT="${TGT%"${TGT##*[![:space:]]}"}"              # rtrim
 case "$TGT" in
     *[!A-Za-z0-9._-]*|'')
