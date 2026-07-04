@@ -83,13 +83,13 @@ Keep the **review discipline** (Operating principle 1): the agent pastes each `<
 
 A step written for one qube and dispatched to another is the nastiest failure mode of this pattern: `bash ~/qctl <wrong-qube> app-cutover` happily tears down services on the wrong qube if nothing checks. Two layers close it:
 
-**Layer 1 — qctl refuses bad dispatch (exit 5).** Every step declares its target near the top as a plain variable line:
+**Layer 1 — qctl refuses bad dispatch (exit 5).** Every step declares its target as the **first executable line** of the file — shebang, comments, and blank lines may precede it, code may not:
 
 ```bash
 QCTL_TARGET=<target-vm>    # or: dom0 | generic
 ```
 
-`qctl` parses that line and hard-refuses to dispatch when it is missing, malformed, or doesn't match the `<target-vm>` CLI argument. The target is thereby stated twice — in the reviewed script and on the command line — and the two must agree, so a typo in either place stops the run before anything executes. `generic` steps (safe on any app qube: recon, `uptime`, disk checks) skip the name match but are refused on infrastructure qubes — TemplateVMs, `sys-*`, and net-providing qubes (checked in dom0 via `qvm-prefs`). Declaring an infrastructure qube *explicitly* is allowed — template work is a normal part of this skill — but qctl announces it with an `INFRA TARGET` banner before running.
+`qctl` hard-refuses to dispatch when the declaration is missing, not in first position, duplicated, malformed, or doesn't match the `<target-vm>` CLI argument. The target is thereby stated twice — in the reviewed script and on the command line — and the two must agree, so a typo in either place stops the run before anything executes. The rules are deliberately rigid, because a guard that "repairs" its input can be repaired into the wrong answer: exactly **one** declaration per step (shell honors a *later* reassignment, so a duplicate means dispatch could validate one value while the runtime guard sees another); the value is a **bare token** — no quotes, no embedded whitespace, though a trailing `#` comment is fine; and first-position means a declaration buried mid-file (after side effects, or inside a heredoc) never passes. `generic` steps (safe on any app qube: recon, `uptime`, disk checks) skip the name match but are refused on infrastructure qubes — TemplateVMs, `sys-*`, and net-providing qubes (checked in dom0 via `qvm-prefs`). Declaring an infrastructure qube *explicitly* is allowed — template work is a normal part of this skill — but qctl announces it with an `INFRA TARGET` banner before running.
 
 **Layer 2 — the step guards itself (exit 9).** The same `QCTL_TARGET` line feeds a short runtime preamble, so the script is self-defending even outside qctl (bare `qvm-run`, copied elsewhere, some future flow). The canonical preamble — emit it at the top of **every** generated step:
 
@@ -103,6 +103,7 @@ else
   command -v qubesdb-read >/dev/null || { echo "[guard] qubesdb-read missing — aborting"; exit 9; }
   SELF="$(qubesdb-read /name 2>/dev/null)"
   TYPE="$(qubesdb-read /qubes-vm-type 2>/dev/null)"
+  { [ -n "$SELF" ] && [ -n "$TYPE" ]; } || { echo "[guard] cannot read qube identity from qubesdb — aborting"; exit 9; }
   if [ "$QCTL_TARGET" = "generic" ]; then
     case "$SELF" in sys-*) echo "[guard] generic step on infrastructure qube '$SELF' — aborting"; exit 9;; esac
     [ "$TYPE" != "TemplateVM" ] || { echo "[guard] generic step on a TemplateVM — aborting"; exit 9; }
@@ -113,7 +114,9 @@ fi
 # --- end guard ---
 ```
 
-Facts the guard relies on (verified on Qubes 4.3): `qubesdb-read /name` returns the qube's own name from inside any VM; `qubesdb-read /qubes-vm-type` returns `AppVM`/`TemplateVM`/`StandaloneVM`/`DispVM`; `/usr/share/qubes/marker-vm` exists in every VM and never in dom0.
+Facts the guard relies on (verified on Qubes 4.3): `qubesdb-read /name` returns the qube's own name from inside any VM; `qubesdb-read /qubes-vm-type` returns `AppVM`/`TemplateVM`/`StandaloneVM`/`DispVM`; `/usr/share/qubes/marker-vm` exists in every VM and never in dom0. If qubesdb answers empty (service trouble), the guard aborts rather than classifying blind.
+
+**The two layers are not equivalent — know what Layer 2 can't see.** `provides_network` is a dom0 preference with no reliable in-VM signal, so the net-provider refusal exists **only at dispatch** (Layer 1). A `generic` step run *outside* qctl on a net-providing qube that is neither a TemplateVM nor named `sys-*` (say, a custom `corp-vpn`) passes the runtime preamble — Layer 2's denylist is the name + type heuristics only. For targeted steps the layers agree (an exact name match doesn't care about klass); the asymmetry only affects `generic` steps on unconventionally-named infrastructure. If that gap matters for a qube, name it `sys-*` or dispatch through qctl.
 
 Exit codes are deliberately distinct: **5** = qctl refused at dispatch (nothing ran); **9** = the step's own preamble fired at runtime. Anything else is the step's own status.
 
@@ -123,7 +126,7 @@ Exit codes are deliberately distinct: **5** = qctl refused at dispatch (nothing 
 
 Codified from steps that drove real migrations. Every generated step should:
 
-1. **Open with the target-guard preamble** (above) — declaration first, then guard.
+1. **Open with the target-guard preamble** (above). The `QCTL_TARGET=` declaration is the *first executable line* of the file — qctl enforces this — with the guard immediately after. The guard doesn't depend on shell options, so `set -u` comes after the preamble, not before.
 2. **`set -u`** at minimum; `set -uo pipefail` when pipes carry the result.
 3. **Echo state before and after every mutation** — `== BEFORE ==` / `== AFTER ==` blocks around the change, so the human sees what was and what is, not just "ok".
 4. **Verify positively AND negatively.** After a change, show the intended thing working and the removed/blocked thing actually gone — a firewall step should show the blocked path timing out, not only the allowed path succeeding.

@@ -46,12 +46,15 @@
 # never piped to `bash` over stdin — so a heredoc or nested `qvm-run --pass-io`
 # inside a step can't drain the rest of the script stream.
 #
-# Target guard (v2): every step must declare its intended target near the top:
+# Target guard (v2): every step must declare its intended target as the FIRST
+# executable line of the file (shebang/comments/blanks may precede it):
 #   QCTL_TARGET=<qube-name>    # or: dom0 | generic
-# qctl refuses to dispatch (exit 5) when the declaration is missing or doesn't
-# match the <target-vm> argument. The target is thereby stated twice — once in
-# the reviewed script, once on the command line — and the two must agree; that
-# is what catches a fat-fingered `qctl <wrong-vm> <step>` before anything runs.
+# Exactly one declaration, bare unquoted value (a trailing comment is fine).
+# qctl refuses to dispatch (exit 5) when the declaration is missing, not in
+# first position, duplicated, malformed, or doesn't match the <target-vm>
+# argument. The target is thereby stated twice — once in the reviewed script,
+# once on the command line — and the two must agree; that is what catches a
+# fat-fingered `qctl <wrong-vm> <step>` before anything runs.
 # `generic` steps (safe on any app qube) skip the name match but are refused on
 # infrastructure targets: TemplateVMs, sys-* qubes, and net-providing qubes.
 # Naming an infrastructure qube explicitly IS allowed (template work is a
@@ -95,38 +98,65 @@ if [ ! -s "$DOM0_TMP" ]; then
 fi
 
 # ---- target guard ----------------------------------------------------------
-# The declaration is parsed from the step file itself: a top-of-file
-# QCTL_TARGET= line, which doubles as the variable the step's own runtime
-# guard preamble reads (SKILL.md "Target guard"). Strip an optional trailing
-# comment and quotes, then hold the value to the same safe charset as the
-# CLI names above.
-DECL_LINE="$(grep -m1 '^QCTL_TARGET=' "$DOM0_TMP")" || DECL_LINE=""
-if [ -z "$DECL_LINE" ]; then
-    echo "[qctl] TARGET GUARD: ${S}.sh declares no QCTL_TARGET — refusing to dispatch."
-    echo "[qctl] Every step must open with the guard preamble (QCTL_TARGET=<qube>|dom0|generic;"
-    echo "[qctl] see SKILL.md 'Target guard'). Regenerate the step with the preamble and retry."
+# The declaration is the FIRST executable line of the step (shebang, comments
+# and blank lines skipped) — not merely present somewhere in the file. A
+# declaration buried mid-file would pass a grep but let side effects run
+# before the runtime guard, and one inside a heredoc isn't a declaration at
+# all. It also doubles as the variable the step's own guard preamble reads
+# (SKILL.md "Target guard"), so dispatch-time and runtime read the same line.
+FIRST_CODE=""
+while IFS= read -r line || [ -n "$line" ]; do
+    line="${line#"${line%%[![:space:]]*}"}"      # ltrim
+    [ -z "$line" ] && continue                    # blank
+    case "$line" in '#'*) continue ;; esac        # comment / shebang
+    FIRST_CODE="$line"
+    break
+done < "$DOM0_TMP"
+case "$FIRST_CODE" in
+    QCTL_TARGET=*) ;;
+    *)
+        echo "[qctl] TARGET GUARD: the first executable line of ${S}.sh is not a QCTL_TARGET declaration — refusing to dispatch."
+        echo "[qctl] Every step must open with the guard preamble (QCTL_TARGET=<qube>|dom0|generic before"
+        echo "[qctl] any other code; see SKILL.md 'Target guard'). Regenerate the step and retry."
+        rm -f "$DOM0_TMP"; exit 5 ;;
+esac
+# Exactly one declaration: the runtime guard is plain shell and would honor a
+# later reassignment, so a second QCTL_TARGET= line means dispatch could
+# validate one value while review reads another. Refuse the ambiguity.
+if [ "$(grep -cE '^[[:space:]]*QCTL_TARGET=' "$DOM0_TMP")" -ne 1 ]; then
+    echo "[qctl] TARGET GUARD: ${S}.sh contains more than one QCTL_TARGET declaration — refusing to dispatch."
     rm -f "$DOM0_TMP"; exit 5
 fi
-TGT="${DECL_LINE#QCTL_TARGET=}"
+# Bare value only: strip an optional trailing comment and trailing whitespace,
+# then hold the value to the same safe charset as the CLI names above. No
+# quote-stripping or whitespace-deletion — a normalizer that "repairs" a
+# malformed declaration can silently turn it into a different valid qube
+# name, which is exactly what a guard must not do. Anything but a clean bare
+# token fails closed.
+TGT="${FIRST_CODE#QCTL_TARGET=}"
 TGT="${TGT%%#*}"
-TGT="${TGT//[[:space:]]/}"
-TGT="${TGT//\"/}"
-TGT="${TGT//\'/}"
+TGT="${TGT%"${TGT##*[![:space:]]}"}"              # rtrim
 case "$TGT" in
     *[!A-Za-z0-9._-]*|'')
-        echo "[qctl] TARGET GUARD: malformed QCTL_TARGET in ${S}.sh (expected a qube name, 'dom0', or 'generic')"
+        echo "[qctl] TARGET GUARD: malformed QCTL_TARGET in ${S}.sh (expected a bare qube name, 'dom0', or 'generic' — no quotes or whitespace)"
         rm -f "$DOM0_TMP"; exit 5 ;;
 esac
 
 # Classify the dispatch target once (dom0 aside): klass + provides_network via
-# qvm-prefs, plus the sys-* naming convention. A qube qvm-prefs can't see does
-# not exist — surface that here as a clear error instead of a confusing
-# qvm-run failure later.
+# qvm-prefs, plus the sys-* naming convention. Both reads hard-fail: qvm-prefs
+# can fail for more reasons than "no such qube" (qubesd down, permissions), so
+# surface its actual stderr instead of guessing — and a guard that can't
+# classify the target must not fall through to "not infrastructure".
 IS_INFRA=0
 if [ "$VM" != "dom0" ]; then
     KLASS="$(qvm-prefs "$VM" klass 2>/dev/null)" || {
-        echo "[qctl] ERROR: no such qube '$VM' (qvm-prefs failed)"; rm -f "$DOM0_TMP"; exit 2; }
-    PROVNET="$(qvm-prefs "$VM" provides_network 2>/dev/null)" || PROVNET="?"
+        echo "[qctl] ERROR: qvm-prefs klass failed for '${VM}' (no such qube, or qubesd unavailable):"
+        qvm-prefs "$VM" klass 2>&1 >/dev/null | head -3
+        rm -f "$DOM0_TMP"; exit 2; }
+    PROVNET="$(qvm-prefs "$VM" provides_network 2>/dev/null)" || {
+        echo "[qctl] ERROR: qvm-prefs provides_network failed for '${VM}':"
+        qvm-prefs "$VM" provides_network 2>&1 >/dev/null | head -3
+        rm -f "$DOM0_TMP"; exit 2; }
     case "$VM" in sys-*) IS_INFRA=1 ;; esac
     [ "$KLASS" = "TemplateVM" ] && IS_INFRA=1
     [ "$PROVNET" = "True" ] && IS_INFRA=1
