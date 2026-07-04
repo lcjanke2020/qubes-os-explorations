@@ -21,7 +21,7 @@ This skill is one of several ways to get admin work done on a qube. Which is rig
 
 **qrexec direct exec — no sshd, no open port, ever.** Qubes' own inter-qube RPC can give an agent qube a path into a target qube with no network listener at all: `qubes.ConnectTCP` forwards a TCP port qube-to-qube over qrexec (to reach a service bound to localhost on the target), and a VMShell-style qrexec service provides command execution the same way. Both are gated by explicit dom0 policy, scoped per source→target pair, and the policy can be set to `ask` so every invocation raises a dom0 prompt. Setup is a few short dom0 policy lines — the good kind of dom0 typing. The tradeoff, stated honestly: an `allow` policy grants the agent *standing* exec rights on the target — you've traded per-step human review for a one-time channel approval. `ask` restores a per-call human decision, but the prompt shows the channel, not the command about to run.
 
-There is no universally right row in that table; it's the user's risk decision, made per qube. The job of this skill is to make the tradeoffs visible, not to make the choice.
+There is no universally right choice among those four paths; it's the user's risk decision, made per qube. The job of this skill is to make the tradeoffs visible, not to make the choice.
 
 **One position worth naming outright:** some Qubes users will conclude that no LLM should control — or even draft commands for — any part of their Qubes installation. Given what Qubes is for, that can be a perfectly sound assessment of their own situation, and nothing in this skill argues with it. Everything here is for users who have consciously decided otherwise and want the residual risk structured, reviewable, and minimized.
 
