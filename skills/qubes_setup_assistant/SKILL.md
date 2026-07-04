@@ -9,6 +9,22 @@ Field-tested patterns and traps for Qubes OS provisioning and administration wor
 
 **Scope:** this skill collects broad patterns + traps — not a single linear recipe. They apply whether you're building an agent host, a minimal-surface DB qube, or anything in between. Pair them with whatever phased provisioning procedure you use for a specific qube type.
 
+## Choosing a control path (read this first)
+
+This skill is one of several ways to get admin work done on a qube. Which is right depends on the work at hand — and on how much agent involvement your threat model tolerates. The honest comparison:
+
+**Typing commands directly** (dom0 terminal, or a terminal in the target qube). The baseline Qubes posture, and the right call for short commands — `qvm-prefs`, a one-line firewall rule, a package query. Zero agent exposure. The honest cost: humans typo, and the longer the command, the worse the odds — a mistyped multi-line config edit can wreck a service as surely as a wrong script. Keeping dom0 input to short commands is the ideal; complex work is exactly where hand-typing breaks down, and it's what pushes people toward scripted help in the first place.
+
+**This skill** (agent drafts → human reviews → human dispatches via `qctl` from dom0). No new listeners, no open ports, no credentials added to any qube. dom0 stays the human choke point: every step is a small reviewable artifact the human runs deliberately, with output captured for the agent. The risks, stated plainly: an agent can generate a wrong-but-plausible script, and reviewing step 14 of 20 tests anyone's attention — review habituation is real. The target guard (below) removes the wrong-qube dispatch failure class; it does nothing about wrong *content*. That's what the review discipline — small single-purpose steps, echo-before-do — is for.
+
+**SSH into the target qube** (agent works over ssh from its own qube). Where SSH access already exists — or the qube is one you've deliberately decided should have it — prefer it. Standard tooling, fully interactive, dom0 out of the workflow entirely. The costs: an sshd running on the qube, an open port (even tailnet- or LAN-scoped), key material to manage, and teardown that reliably never happens ("we'll close it after the migration"). Every listener is surface, and standing surface runs against the Qubes minimal-surface grain. **This skill's actual niche is qubes you deliberately keep SSH-free** — don't reach for it as a lazy substitute on qubes that have, or should have, SSH.
+
+**qrexec direct exec — no sshd, no open port, ever.** Qubes' own inter-qube RPC can give an agent qube a path into a target qube with no network listener at all: `qubes.ConnectTCP` forwards a TCP port qube-to-qube over qrexec (to reach a service bound to localhost on the target), and a VMShell-style qrexec service provides command execution the same way. Both are gated by explicit dom0 policy, scoped per source→target pair, and the policy can be set to `ask` so every invocation raises a dom0 prompt. Setup is a few short dom0 policy lines — the good kind of dom0 typing. The tradeoff, stated honestly: an `allow` policy grants the agent *standing* exec rights on the target — you've traded per-step human review for a one-time channel approval. `ask` restores a per-call human decision, but the prompt shows the channel, not the command about to run.
+
+There is no universally right row in that table; it's the user's risk decision, made per qube. The job of this skill is to make the tradeoffs visible, not to make the choice.
+
+**One position worth naming outright:** some Qubes users will conclude that no LLM should control — or even draft commands for — any part of their Qubes installation. Given what Qubes is for, that can be a perfectly sound assessment of their own situation, and nothing in this skill argues with it. Everything here is for users who have consciously decided otherwise and want the residual risk structured, reviewable, and minimized.
+
 ## Workstation defaults vs. infrastructure defaults — what we're doing differently
 
 Qubes' canonical user is a security-aware human at a workstation: interactive sessions, the human as the actor, "rebuild the qube" as a reasonable recovery. Defaults are tuned for that — most notably *passwordless sudo for the user* (because sudo prompts get trained into click-through-yes habituation in that flow).
@@ -57,10 +73,64 @@ Model:
   export QCTL_WORK=<work-qube>
   ```
 - Thereafter each step is `bash ~/qctl <target-vm|dom0> <step-name>`. `qctl` pulls the script to a **dom0 tmpfile**, runs it from there (staged into a tmpfile inside the target VM and run as root, or directly in dom0 for `dom0`), then streams the combined output back to `/tmp/qctl/<step>.out` on the work qube for the agent to read (dom0 copy kept at `/tmp/qctl-<step>.out`). `qctl` exits with the **step's own status**, so a failed step is detectable rather than silently reported as success.
+- Every step opens with the **target-guard preamble** and its `QCTL_TARGET=` declaration (see "Target guard" below). `qctl` hard-refuses to dispatch a step whose declaration is missing, malformed, or doesn't match the CLI target (exit 5) — undeclared steps don't run, period.
 
 Why run from a tmpfile, not `… | bash`: a step that contains a heredoc or a nested `qvm-run --pass-io` would otherwise drain the script stream off stdin. `qctl` does this on **both** execution paths — the dom0 path runs `bash <tmpfile>`, and the in-VM path stages the script into a tmpfile inside the target VM (`cat > "$T"; bash "$T"`) rather than `qvm-run … 'bash' < script` — each with the step's own stdin redirected from `/dev/null`. When a step *needs* to feed a script into a nested VM, redirect that nested `qvm-run` from a file/pipe — never from the inherited stdin.
 
 Keep the **review discipline** (Operating principle 1): the agent pastes each `<step>.sh` in chat before the human runs it; scripts stay small and single-purpose; secret-bearing steps print nothing sensitive and shred their copies (Pattern C). This pattern was field-tested driving a database-qube migration end-to-end from an app-qube agent.
+
+### Target guard — making sure a step runs where it was meant to
+
+A step written for one qube and dispatched to another is the nastiest failure mode of this pattern: `bash ~/qctl <wrong-qube> app-cutover` happily tears down services on the wrong qube if nothing checks. Two layers close it:
+
+**Layer 1 — qctl refuses bad dispatch (exit 5).** Every step declares its target near the top as a plain variable line:
+
+```bash
+QCTL_TARGET=<target-vm>    # or: dom0 | generic
+```
+
+`qctl` parses that line and hard-refuses to dispatch when it is missing, malformed, or doesn't match the `<target-vm>` CLI argument. The target is thereby stated twice — in the reviewed script and on the command line — and the two must agree, so a typo in either place stops the run before anything executes. `generic` steps (safe on any app qube: recon, `uptime`, disk checks) skip the name match but are refused on infrastructure qubes — TemplateVMs, `sys-*`, and net-providing qubes (checked in dom0 via `qvm-prefs`). Declaring an infrastructure qube *explicitly* is allowed — template work is a normal part of this skill — but qctl announces it with an `INFRA TARGET` banner before running.
+
+**Layer 2 — the step guards itself (exit 9).** The same `QCTL_TARGET` line feeds a short runtime preamble, so the script is self-defending even outside qctl (bare `qvm-run`, copied elsewhere, some future flow). The canonical preamble — emit it at the top of **every** generated step:
+
+```bash
+# --- target guard ---
+QCTL_TARGET=<target-vm>            # or: dom0 | generic
+if [ "$QCTL_TARGET" = "dom0" ]; then
+  [ ! -f /usr/share/qubes/marker-vm ] || { echo "[guard] expected dom0, found a VM — aborting"; exit 9; }
+else
+  [ -f /usr/share/qubes/marker-vm ] || { echo "[guard] not inside a Qubes VM — aborting"; exit 9; }
+  command -v qubesdb-read >/dev/null || { echo "[guard] qubesdb-read missing — aborting"; exit 9; }
+  SELF="$(qubesdb-read /name 2>/dev/null)"
+  TYPE="$(qubesdb-read /qubes-vm-type 2>/dev/null)"
+  if [ "$QCTL_TARGET" = "generic" ]; then
+    case "$SELF" in sys-*) echo "[guard] generic step on infrastructure qube '$SELF' — aborting"; exit 9;; esac
+    [ "$TYPE" != "TemplateVM" ] || { echo "[guard] generic step on a TemplateVM — aborting"; exit 9; }
+  else
+    [ "$SELF" = "$QCTL_TARGET" ] || { echo "[guard] running on '$SELF', expected '$QCTL_TARGET' — aborting"; exit 9; }
+  fi
+fi
+# --- end guard ---
+```
+
+Facts the guard relies on (verified on Qubes 4.3): `qubesdb-read /name` returns the qube's own name from inside any VM; `qubesdb-read /qubes-vm-type` returns `AppVM`/`TemplateVM`/`StandaloneVM`/`DispVM`; `/usr/share/qubes/marker-vm` exists in every VM and never in dom0.
+
+Exit codes are deliberately distinct: **5** = qctl refused at dispatch (nothing ran); **9** = the step's own preamble fired at runtime. Anything else is the step's own status.
+
+**dom0 steps get weaker protection — compensate with visibility.** A `QCTL_TARGET=dom0` step acts on *other* qubes via `qvm-*` commands, and no name check can verify those are the qubes you meant. Convention: a dom0 step sets the qubes it touches in one variable block at the top (where review catches them), `echo`s them before acting, and prints an explicit `ROLLBACK:` line for anything it changed.
+
+### Step-script conventions
+
+Codified from steps that drove real migrations. Every generated step should:
+
+1. **Open with the target-guard preamble** (above) — declaration first, then guard.
+2. **`set -u`** at minimum; `set -uo pipefail` when pipes carry the result.
+3. **Echo state before and after every mutation** — `== BEFORE ==` / `== AFTER ==` blocks around the change, so the human sees what was and what is, not just "ok".
+4. **Verify positively AND negatively.** After a change, show the intended thing working and the removed/blocked thing actually gone — a firewall step should show the blocked path timing out, not only the allowed path succeeding.
+5. **Print a `ROLLBACK:` line** for any state-changing step — the exact command to undo it, echoed at the end where it's on screen the moment something looks wrong.
+6. **No silent privilege.** Steps run as root via `--user root`; a `sudo` prefix in-script is redundant there (Trap 2) and only misleads a reviewer about where privilege comes from. If a step must switch users (`sudo -u postgres`), that's meaningful — keep it, and only it.
+7. **Idempotent at the step boundary, or say so.** Re-running a step should be safe; if it isn't, the header comment says "run once" and why.
+8. **Secrets never in output.** Follow Pattern C: generate inside the target, ship via file redirect, shred both copies. A step's `.out` lands back on the work qube where the agent reads it — treat everything a step prints as agent-visible by design.
 
 ## Traps
 

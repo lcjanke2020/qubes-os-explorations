@@ -1,0 +1,8 @@
+# Session working files (agent workflow bookends) — never committed
+TICKET.md
+PLAN.md
+FINDINGS.md
+COST.md
+
+# Local agent-tool settings (model pins, permission approvals) — machine-local
+.claude/
