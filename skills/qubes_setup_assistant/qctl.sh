@@ -12,9 +12,13 @@
 # chmodded 0644 for the agent). qctl exits with the STEP's own exit status, so a
 # failed step is detectable when chaining many of them. Other exit codes are
 # distinct so $? is unambiguous: 1 = couldn't stage/pull the step script;
-# 2 = bad VM/step/work-qube name; 3 = ran the step but couldn't deliver output
-# back to the work qube (contract breach); 4 = refused to write through a symlink
-# at the dom0 output path.
+# 2 = bad VM/step/work-qube name (or no such qube); 3 = ran the step but
+# couldn't deliver output back to the work qube (contract breach); 4 = refused
+# to write through a symlink at the dom0 output path; 5 = target-guard refusal
+# at dispatch (QCTL_TARGET declaration missing, malformed, or not matching the
+# dispatch target). By convention the in-script runtime guard aborts with 9
+# (see SKILL.md "Target guard"), so a dispatch refusal (5 — nothing ran) is
+# distinguishable from a runtime mismatch (9 — the step's own preamble fired).
 #
 # Why this exists: dom0 has no clipboard in or out, and an agent in an app qube
 # can't reach dom0 at all. This turns every step into one short, reviewable
@@ -41,6 +45,20 @@
 # inside the target VM) with the step's own stdin redirected from /dev/null —
 # never piped to `bash` over stdin — so a heredoc or nested `qvm-run --pass-io`
 # inside a step can't drain the rest of the script stream.
+#
+# Target guard (v2): every step must declare its intended target as the FIRST
+# executable line of the file (shebang/comments/blanks may precede it):
+#   QCTL_TARGET=<qube-name>    # or: dom0 | generic
+# Exactly one declaration, bare unquoted value (a trailing comment is fine).
+# qctl refuses to dispatch (exit 5) when the declaration is missing, not in
+# first position, duplicated, malformed, or doesn't match the <target-vm>
+# argument. The target is thereby stated twice — once in the reviewed script,
+# once on the command line — and the two must agree; that is what catches a
+# fat-fingered `qctl <wrong-vm> <step>` before anything runs.
+# `generic` steps (safe on any app qube) skip the name match but are refused on
+# infrastructure targets: TemplateVMs, sys-* qubes, and net-providing qubes.
+# Naming an infrastructure qube explicitly IS allowed (template work is a
+# normal part of this skill) — qctl just announces it loudly before running.
 set -uo pipefail
 umask 077   # dom0-created files (the tmpfile + /tmp/qctl-<step>.out) hold root
             # step output; keep them private. The shipped-back work-qube copy is
@@ -78,6 +96,111 @@ if [ ! -s "$DOM0_TMP" ]; then
     echo "[qctl] ERROR: ${SRC} is present but empty on ${WORK}. Did the agent finish writing it?"
     rm -f "$DOM0_TMP"; exit 1
 fi
+
+# ---- target guard ----------------------------------------------------------
+# The declaration is the FIRST executable line of the step (shebang, comments
+# and blank lines skipped) — not merely present somewhere in the file. A
+# declaration buried mid-file would pass a grep but let side effects run
+# before the runtime guard. It also doubles as the variable the step's own
+# guard preamble reads (SKILL.md "Target guard"), so dispatch-time and
+# runtime read the same line.
+FIRST_CODE=""
+while IFS= read -r line || [ -n "$line" ]; do
+    line="${line#"${line%%[![:space:]]*}"}"      # ltrim
+    [ -z "$line" ] && continue                    # blank
+    case "$line" in '#'*) continue ;; esac        # comment / shebang
+    FIRST_CODE="$line"
+    break
+done < "$DOM0_TMP"
+case "$FIRST_CODE" in
+    QCTL_TARGET=*) ;;
+    *)
+        echo "[qctl] TARGET GUARD: the first executable line of ${S}.sh is not a QCTL_TARGET declaration — refusing to dispatch."
+        echo "[qctl] Every step must open with the guard preamble (QCTL_TARGET=<qube>|dom0|generic before"
+        echo "[qctl] any other code; see SKILL.md 'Target guard'). Regenerate the step and retry."
+        rm -f "$DOM0_TMP"; exit 5 ;;
+esac
+# Exactly one QCTL_TARGET= line in the whole file: the runtime guard is plain
+# shell and would honor a later reassignment, so a second bare declaration
+# means dispatch could validate one value while the step runs under another.
+# The count is a plain line-start grep, NOT a shell parse — heredoc payload
+# and other non-executable occurrences count too, deliberately: refusing to
+# parse shell means failing closed (see SKILL.md for the printf workaround
+# when a step must legitimately EMIT a declaration). Prefixed reassignments
+# (export/readonly) aren't counted, but can't repoint the dispatch either:
+# the CLI target stays authoritative and the runtime guard re-validates, so
+# the worst case there is an exit-9 abort, never a wrong-qube run.
+if [ "$(grep -cE '^[[:space:]]*QCTL_TARGET=' "$DOM0_TMP")" -ne 1 ]; then
+    echo "[qctl] TARGET GUARD: ${S}.sh has more than one line beginning with QCTL_TARGET= — refusing to dispatch."
+    echo "[qctl] (Heredoc/example content counts. A step that must emit a declaration should"
+    echo "[qctl] assemble the token instead — see SKILL.md 'Target guard'.)"
+    rm -f "$DOM0_TMP"; exit 5
+fi
+# Bare value only: strip an optional trailing comment and trailing whitespace,
+# then hold the value to the same safe charset as the CLI names above. No
+# quote-stripping or whitespace-deletion — a normalizer that "repairs" a
+# malformed declaration can silently turn it into a different valid qube
+# name, which is exactly what a guard must not do. Anything but a clean bare
+# token fails closed.
+TGT="${FIRST_CODE#QCTL_TARGET=}"
+# Strip a trailing comment only where bash itself would start one: '#' opens
+# a comment at the beginning of a word (after whitespace), never inside the
+# assignment value. QCTL_TARGET=web#bad assigns 'web#bad' at runtime —
+# parsing it as 'web' here would re-open the dispatch/runtime divergence this
+# guard exists to close, so the '#' falls through to the charset check below
+# and is refused as malformed instead.
+case "$TGT" in
+    *[[:space:]]"#"*) TGT="${TGT%%[[:space:]]"#"*}" ;;
+esac
+TGT="${TGT%"${TGT##*[![:space:]]}"}"              # rtrim
+case "$TGT" in
+    *[!A-Za-z0-9._-]*|'')
+        echo "[qctl] TARGET GUARD: malformed QCTL_TARGET in ${S}.sh (expected a bare qube name, 'dom0', or 'generic' — no quotes or whitespace)"
+        rm -f "$DOM0_TMP"; exit 5 ;;
+esac
+
+# Classify the dispatch target once (dom0 aside): klass + provides_network via
+# qvm-prefs, plus the sys-* naming convention. Both reads hard-fail: qvm-prefs
+# can fail for more reasons than "no such qube" (qubesd down, permissions), so
+# surface its actual stderr instead of guessing — and a guard that can't
+# classify the target must not fall through to "not infrastructure".
+IS_INFRA=0
+if [ "$VM" != "dom0" ]; then
+    KLASS="$(qvm-prefs "$VM" klass 2>/dev/null)" || {
+        echo "[qctl] ERROR: qvm-prefs klass failed for '${VM}' (no such qube, or qubesd unavailable):"
+        qvm-prefs "$VM" klass 2>&1 >/dev/null | head -3
+        rm -f "$DOM0_TMP"; exit 2; }
+    PROVNET="$(qvm-prefs "$VM" provides_network 2>/dev/null)" || {
+        echo "[qctl] ERROR: qvm-prefs provides_network failed for '${VM}':"
+        qvm-prefs "$VM" provides_network 2>&1 >/dev/null | head -3
+        rm -f "$DOM0_TMP"; exit 2; }
+    case "$VM" in sys-*) IS_INFRA=1 ;; esac
+    [ "$KLASS" = "TemplateVM" ] && IS_INFRA=1
+    [ "$PROVNET" = "True" ] && IS_INFRA=1
+fi
+
+if [ "$TGT" = "dom0" ] || [ "$VM" = "dom0" ]; then
+    # dom0 steps must be declared dom0 AND dispatched to dom0 — no drift in
+    # either direction.
+    if [ "$TGT" != "$VM" ]; then
+        echo "[qctl] TARGET GUARD: step '${S}' declares QCTL_TARGET=${TGT} but was dispatched to '${VM}' — refusing."
+        rm -f "$DOM0_TMP"; exit 5
+    fi
+elif [ "$TGT" = "generic" ]; then
+    if [ "$IS_INFRA" -eq 1 ]; then
+        echo "[qctl] TARGET GUARD: generic step '${S}' refused on infrastructure qube '${VM}' (klass=${KLASS}, provides_network=${PROVNET})."
+        echo "[qctl] If this is deliberate, declare QCTL_TARGET=${VM} explicitly in the step."
+        rm -f "$DOM0_TMP"; exit 5
+    fi
+elif [ "$TGT" != "$VM" ]; then
+    echo "[qctl] TARGET GUARD: step '${S}' declares QCTL_TARGET=${TGT} but was dispatched to '${VM}' — refusing."
+    rm -f "$DOM0_TMP"; exit 5
+elif [ "$IS_INFRA" -eq 1 ]; then
+    # Explicitly declared infrastructure target: template/sys work is a normal
+    # part of this skill — allowed, but never silent.
+    echo "[qctl] *** INFRA TARGET (deliberate): '${VM}' klass=${KLASS}, provides_network=${PROVNET} — declared explicitly, proceeding ***"
+fi
+# ---- end target guard -------------------------------------------------------
 
 # The dom0 output copy uses a predictable path so re-running a step overwrites in
 # place. Refuse to follow a symlink planted there, and remove any stale file first
