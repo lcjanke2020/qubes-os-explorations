@@ -1,10 +1,11 @@
-# Serving From a Qube With Zero Inbound Surface: qrexec `ConnectTCP` Instead of sshd
+# Serving From a Qube With No Network-Facing Listener: qrexec `ConnectTCP` Instead of sshd
 
-*A field guide for consuming a service from a qube that has **no inbound network
+*A field guide for consuming a service from a qube that has **no network-facing
 listener at all** — the service binds to `127.0.0.1` and stays there. Other qubes reach
 it over Qubes' own RPC (`qubes.ConnectTCP`), gated by a one-line dom0 policy. Worked
-end-to-end on Qubes OS 4.x with an LLM server (ollama, port `11434`) on a GPU-passthrough
-HVM, consumed by an app qube; the pattern is service-agnostic — substitute your port.*
+end-to-end on Qubes OS 4.1+ (the `/etc/qubes/policy.d` policy format) with an LLM server
+(ollama, port `11434`) on a GPU-passthrough HVM, consumed by an app qube; the pattern is
+service-agnostic — substitute your port.*
 
 ---
 
@@ -20,9 +21,12 @@ qubes.ConnectTCP +11434 <client-qube> <service-qube> allow autostart=no
 
 and a client-side call (`qrexec-client-vm <service-qube> qubes.ConnectTCP+11434`, or a
 small `socat` wrapper when the consumer is a container) gives the client TCP to the
-service qube's **loopback** port — and nothing else. The service qube's inbound surface
-is zero: no open ports other than loopback-bound ones, no key material, no admin channel
-riding along with the service path.
+service qube's **loopback** port — and nothing else. (`+11434` is the **port argument**
+to `qubes.ConnectTCP`: substitute your service's port there and in every client-side
+call.) The service qube has **no network-facing listener**: no open ports other than
+loopback-bound ones, no key material, no admin channel riding along with the service
+path. What remains inbound is exactly what the policy says — a qrexec channel to that
+one port, from that one client qube.
 
 Our reference GPU qube has **never had sshd installed or enabled at any point in its
 life**. Not "locked down later," not "temporarily open during the migration" — never
@@ -37,9 +41,10 @@ around the clock so that a request can arrive occasionally.
 
 `qubes.ConnectTCP` inverts that:
 
-- **Zero listeners on the service qube.** The service binds `127.0.0.1` only. Verify with
-  `ss -ltn` — every socket should show a loopback address. There is nothing for a network
-  scanner (or a compromised LAN/tailnet peer) to even connect to.
+- **No network listeners on the service qube.** The service binds `127.0.0.1` only.
+  Verify with `ss -ltnu` — every socket (UDP included) should show a loopback address.
+  There is nothing for a network scanner (or a compromised LAN/tailnet peer) to even
+  connect to.
 - **Per-pair, per-port grant.** The policy names one port, one source qube, one
   destination qube. It's auditable in a single line, and it grants exactly *TCP to that
   port* — not exec, not a shell, not a tunnel-anything sshd. (Contrast a standing sshd:
@@ -56,12 +61,18 @@ passthrough qube is a **more privileged neighbor** than a plain AppVM: it owns r
 hardware behind the IOMMU, runs a large vendor driver stack, and tends to become a
 long-lived pet with expensive state (driver builds, model files) — exactly the kind of
 qube people bolt sshd onto "for convenience." Its privileged position argues the other
-way: the more a qube touches, the stronger the case for keeping its inbound surface at
-zero. With this pattern the GPU qube serves a multi-gigabyte model to another qube while
-exposing **no port beyond loopback**.
+way: the more a qube touches, the stronger the case for keeping it off the network
+entirely. With this pattern the GPU qube serves a multi-gigabyte model to another qube
+while exposing **no port beyond loopback**.
 
 ## The honest tradeoffs
 
+- **The service itself is still attack surface — to exactly one client.** `ConnectTCP`
+  removes *network reachability*; it does not harden the application behind it. The
+  client qube named in the policy gets a raw TCP path to the service's protocol parser,
+  so a compromised client qube can attack the service directly, same as any consumer
+  could. What you've removed is everyone else — plus the admin channel a listener like
+  sshd would have bundled in.
 - **An `allow` policy is standing access.** The client qube can reach that one loopback
   port whenever the service qube is running — you've traded a per-connection human
   decision for a one-time, narrowly-scoped grant. (You can write `ask` instead of `allow`
@@ -98,11 +109,14 @@ TL;DR). Two things to get right:
   client falls back → `qvm-ls` confirms the qube **stayed halted**.
 
 **2. Serving side** — bind the service to `127.0.0.1` only (for ollama that's the
-default). Verify: `ss -ltn` inside the service qube shows only loopback listeners.
+default). Verify: `ss -ltnu` inside the service qube shows only loopback-bound sockets.
 
-**3. Client side** — a process that can exec `qrexec-client-vm` can connect directly. A
-consumer that can't (a container, a runtime that only speaks TCP) needs a small host-side
-forwarder in the client qube:
+**3. Client side** — the qrexec call carries the TCP stream over stdio, so an ordinary
+HTTP client can't invoke it directly; something must bridge TCP to `qrexec-client-vm`.
+Qubes ships that bridge: `qvm-connect-tcp ::11434` binds `localhost:11434` in the client
+qube and forwards over qrexec — sufficient when the consumer runs directly on the client
+qube. A **containerized** consumer can't reach the client qube's localhost, though, so it
+needs a forwarder bound to an address the container can route to:
 
 ```bash
 socat TCP-LISTEN:11434,fork,reuseaddr,bind=<local-bind-ip> \
@@ -110,15 +124,17 @@ socat TCP-LISTEN:11434,fork,reuseaddr,bind=<local-bind-ip> \
 ```
 
 Where `<local-bind-ip>` is scoped as tightly as the consumer allows — for a docker-compose
-container that's the project's own bridge gateway (**not** `docker0`; inter-bridge
-isolation blocks that), plus an nft `custom-input` accept, plus `rc.local` persistence.
+container that's the project's *own* bridge gateway (e.g. `172.20.0.1`; **not** `docker0`,
+which inter-bridge isolation blocks), plus an nft `custom-input` accept, plus `rc.local`
+persistence.
 That fully-worked production case — compose-gateway bind, Qubes firewall rule, reboot
 persistence, fallback wiring — is documented in the
 [OB1 GPU-offload transport doc](https://github.com/lcjanke2020/ob1-selfhosted/blob/main/deploy/qubes/gpu-offload-transport.md).
 
 ## Verification recipe
 
-1. **Zero-listener check** (service qube): `ss -ltn` — loopback binds only.
+1. **No-listener check** (service qube): `ss -ltnu` — loopback binds only (UDP included;
+   the claim is *no network-facing sockets*, not just no TCP listeners).
 2. **Path check** (client qube): `curl http://<local-bind-ip>:11434/v1/models` returns the
    service's response through qrexec.
 3. **Negative check** (dom0 + client): halt the service qube, repeat the curl — it must
