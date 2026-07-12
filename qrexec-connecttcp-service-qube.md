@@ -41,10 +41,10 @@ around the clock so that a request can arrive occasionally.
 
 `qubes.ConnectTCP` inverts that:
 
-- **No network listeners on the service qube.** The service binds `127.0.0.1` only.
-  Verify with `ss -ltnu` — every socket (UDP included) should show a loopback address.
-  There is nothing for a network scanner (or a compromised LAN/tailnet peer) to even
-  connect to.
+- **No network-facing listeners on the service qube.** The service binds `127.0.0.1`
+  only. Verify with `ss -ltnu` — every socket (UDP included) should show a loopback
+  address. There is nothing for a network scanner (or a compromised LAN/tailnet peer) to
+  even connect to.
 - **Per-pair, per-port grant.** The policy names one port, one source qube, one
   destination qube. It's auditable in a single line, and it grants exactly *TCP to that
   port* — not exec, not a shell, not a tunnel-anything sshd. (Contrast a standing sshd:
@@ -61,8 +61,8 @@ passthrough qube is a **more privileged neighbor** than a plain AppVM: it owns r
 hardware behind the IOMMU, runs a large vendor driver stack, and tends to become a
 long-lived pet with expensive state (driver builds, model files) — exactly the kind of
 qube people bolt sshd onto "for convenience." Its privileged position argues the other
-way: the more a qube touches, the stronger the case for keeping it off the network
-entirely. With this pattern the GPU qube serves a multi-gigabyte model to another qube
+way: the more a qube touches, the stronger the case for denying it any network-facing
+listener. With this pattern the GPU qube serves a multi-gigabyte model to another qube
 while exposing **no port beyond loopback**.
 
 ## The honest tradeoffs
@@ -113,10 +113,21 @@ default). Verify: `ss -ltnu` inside the service qube shows only loopback-bound s
 
 **3. Client side** — the qrexec call carries the TCP stream over stdio, so an ordinary
 HTTP client can't invoke it directly; something must bridge TCP to `qrexec-client-vm`.
-Qubes ships that bridge: `qvm-connect-tcp ::11434` binds `localhost:11434` in the client
-qube and forwards over qrexec — sufficient when the consumer runs directly on the client
-qube. A **containerized** consumer can't reach the client qube's localhost, though, so it
-needs a forwarder bound to an address the container can route to:
+Qubes ships that bridge: `qvm-connect-tcp 11434:<service-qube>:11434` forwards local port
+`11434` over qrexec — sufficient when the consumer runs directly on the client qube. Two
+things to know about the stock wrapper:
+
+- **Name the destination explicitly.** The short form `::11434` sends the call as
+  `@default`, which this guide's explicit-destination policy refuses — gotcha #1 cuts
+  both ways (policy and caller must agree on how the destination is named).
+- **It listens on all of the client qube's interfaces**, not just localhost — the
+  upstream script omits a `bind=` — so the client qube's own inbound firewall (default
+  deny) is what keeps that port from being reachable by its network peers.
+
+A **containerized** consumer can't usefully reach either of those anyway (a container
+can't see the qube's localhost, and the Qubes nft `input` chain drops container→host
+traffic by default), so it gets a purpose-bound forwarder instead — scoped to exactly the
+address the container routes to:
 
 ```bash
 socat TCP-LISTEN:11434,fork,reuseaddr,bind=<local-bind-ip> \
@@ -133,10 +144,12 @@ persistence, fallback wiring — is documented in the
 
 ## Verification recipe
 
-1. **No-listener check** (service qube): `ss -ltnu` — loopback binds only (UDP included;
-   the claim is *no network-facing sockets*, not just no TCP listeners).
-2. **Path check** (client qube): `curl http://<local-bind-ip>:11434/v1/models` returns the
-   service's response through qrexec.
+1. **Network-facing listener check** (service qube): `ss -ltnu` — every socket
+   loopback-bound (UDP included; the claim is *no network-facing sockets*, not no sockets
+   at all).
+2. **Path check** (client qube): `curl http://localhost:11434/v1/models` (stock
+   `qvm-connect-tcp` wrapper) or `curl http://<local-bind-ip>:11434/v1/models` (container
+   forwarder) returns the service's response through qrexec.
 3. **Negative check** (dom0 + client): halt the service qube, repeat the curl — it must
    fail *fast* (connection closed, not a hang), and `qvm-ls <service-qube>` must still
    show `Halted`. If the qube started, you forgot `autostart=no`.
