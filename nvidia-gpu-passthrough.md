@@ -237,13 +237,21 @@ NVIDIA RTX 6000 Ada Generation   46068MiB   P8   13W / 300W   0%
 
 The fix patches **driver source**, so it must be re-applied and rebuilt on every driver update. Wrap it in a script:
 
-> **If you have hardened the qube to require a sudo password**, every `sudo` below prompts, so this script cannot be run unattended from a non-interactive shell. Two options: type the password at a console in the qube, or run the whole thing as root from dom0 —
+> **If you have hardened the qube to require a sudo password**, this script can no longer run unattended — and it fails in a way that points at the wrong thing. Non-interactively `sudo` has no way to prompt, so `sudo dkms status` fails with `a terminal is required to read the password`; that goes to stderr, which the `MOD=` line discards with `2>/dev/null`. `$MOD` ends up empty and the guard below reports `ERROR: 'dkms status' reported no nvidia module to rebuild.` — sending you after the driver instead of the sudo config you changed months earlier.
+>
+> Either type the password at a console in the qube, or run the script as root from dom0, where no password is involved:
 >
 > ```bash
+> # a copy kept inside the qube
+> qvm-run --pass-io --user root <gpu-qube> 'bash /home/user/repatch.sh'
+>
+> # or stream a dom0-local copy. NB the redirection is evaluated by the *dom0*
+> # shell, so repatch.sh must exist there — a script saved only inside the qube
+> # gives you "repatch.sh: No such file or directory".
 > qvm-run --pass-io --user root <gpu-qube> 'bash -s' < repatch.sh
 > ```
 >
-> `qvm-run --user root` goes over qrexec and is unaffected by the qube's `sudoers` and polkit configuration, which also makes it the break-glass path if an in-qube password is ever lost. Confirm it works on your system *before* you harden the qube. (Requiring a sudo password is a deliberate departure from the Qubes default — reasonable for a qube running an unattended service, unnecessary for one you personally drive.)
+> `qvm-run --user root` goes over qrexec and is unaffected by the qube's `sudoers` and polkit configuration, which also makes it the break-glass path if an in-qube password is ever lost. The script needs no edits either way — `sudo` skips authentication for uid 0, so its internal `sudo` calls become no-ops. Confirm this path works on your system *before* you harden the qube. (Requiring a sudo password is a deliberate departure from the Qubes default — reasonable for a qube running an unattended service, unnecessary for one you personally drive.)
 
 ```bash
 #!/bin/bash
