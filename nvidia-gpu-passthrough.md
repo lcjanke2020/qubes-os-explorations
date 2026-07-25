@@ -237,6 +237,14 @@ NVIDIA RTX 6000 Ada Generation   46068MiB   P8   13W / 300W   0%
 
 The fix patches **driver source**, so it must be re-applied and rebuilt on every driver update. Wrap it in a script:
 
+> **If you have hardened the qube to require a sudo password**, every `sudo` below prompts, so this script cannot be run unattended from a non-interactive shell. Two options: type the password at a console in the qube, or run the whole thing as root from dom0 —
+>
+> ```bash
+> qvm-run --pass-io --user root <gpu-qube> 'bash -s' < repatch.sh
+> ```
+>
+> `qvm-run --user root` goes over qrexec and is unaffected by the qube's `sudoers` and polkit configuration, which also makes it the break-glass path if an in-qube password is ever lost. Confirm it works on your system *before* you harden the qube. (Requiring a sudo password is a deliberate departure from the Qubes default — reasonable for a qube running an unattended service, unnecessary for one you personally drive.)
+
 ```bash
 #!/bin/bash
 set -euo pipefail
