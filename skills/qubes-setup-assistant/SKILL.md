@@ -230,13 +230,25 @@ When a script must generate a secret (random password, key) inside a target qube
 
 For any AppVM that needs net only for installation: open a narrow allowlist (mirror hostnames only) + drop, do the install, then switch to deny-all for steady state. Don't leave the install-time allowlist behind.
 
-The switch has a trap: `qvm-firewall <vm> reset` does **not** leave an empty ruleset — it reinstalls a single `action=accept` rule (its own help text: "reset to default (accept all connections)"). First match wins, so a drop rule *appended* after that accept never executes — the qube has unrestricted network access while `qvm-firewall list` dutifully shows your drop rule. Insert the drop *before* the accept instead:
+The switch has a trap: `qvm-firewall <vm> reset` does **not** leave an empty ruleset — it saves a single `action=accept` rule (its own help text: "reset to default (accept all connections)"). A later `add` is a separate save, so `reset && add ...` creates an unrestricted-egress window and strands the qube in accept-all if the second command is interrupted or fails. Avoid `reset` entirely: install the deny-all first, verify it, and only then remove the now-unreachable install-time accepts.
 
 ```bash
-qvm-firewall <vm> reset && qvm-firewall <vm> add --before 0 action=drop
+# 1. BEFORE the transition, from inside the qube: prove the test path works.
+curl --max-time 5 https://deb.debian.org
+
+# 2. In dom0: make the first state change fail closed.
+qvm-firewall <vm> add --before 0 action=drop
+qvm-firewall <vm> list   # the all-destination drop must be rule 0
+
+# 3. From inside the qube: repeat the same probe; it must now fail.
+curl --max-time 5 https://deb.debian.org
+
+# 4. Back in dom0: delete every obsolete install-time accept by its full rule spec.
+qvm-firewall <vm> del action=accept dsthost=<mirror-host>
+qvm-firewall <vm> list   # confirm only the intended steady-state policy remains
 ```
 
-(`action=drop` is a positional rule expression — there is no `--action` option.) Then verify from *inside* the qube, e.g. `curl --max-time 5 https://deb.debian.org` must time out. This is the same placement trap [tailscale-lan-lockdown.md](../../tailscale-lan-lockdown.md) documents — a drop that sits after an accept "looks applied" in the list output and never matches.
+(`action=drop` is a positional rule expression — there is no `--action` option.) Qubes implements `drop` as an ICMP administrative reject, so the negative probe may fail immediately with an unreachable/prohibited error rather than time out; either is a pass. The pre-change success is what prevents a DNS or endpoint outage from false-passing the negative check. This is the same placement trap [tailscale-lan-lockdown.md](../../tailscale-lan-lockdown.md) documents — a drop that sits after an accept "looks applied" in the list output and never matches.
 
 ### Pattern E — When troubleshooting "did the script actually take," verify state directly
 
