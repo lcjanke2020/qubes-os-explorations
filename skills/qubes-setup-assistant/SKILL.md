@@ -290,7 +290,29 @@ A countermeasure that touches only the sudoers half leaves root one `pkexec` awa
 
 Close all three paths at once using one of these deliberately different scopes:
 
-- **Preferred, durable, template-wide:** remove the package in a dedicated template (`apt-get remove qubes-core-agent-passwordless-root` / `dnf remove qubes-core-agent-passwordless-root`). This is [Qubes' documented route](https://doc.qubes-os.org/en/latest/user/security-in-qubes/vm-sudo.html#replacing-passwordless-root-access) and removes the three grant files; it also changes every qube that shares that template.
+- **Preferred, durable, template-wide:** remove the package in a dedicated template, using purge on Debian:
+  ```bash
+  apt-get purge qubes-core-agent-passwordless-root   # Debian
+  dnf remove qubes-core-agent-passwordless-root     # Fedora
+  ```
+  On Debian, plain `apt-get remove` is insufficient: `/etc/sudoers.d/qubes` and `/etc/polkit-1/rules.d/00-qubes-allow-all.rules` are conffiles, so ordinary removal preserves both active root grants. Purge removes them. This is [Qubes' documented package-removal route](https://doc.qubes-os.org/en/latest/user/security-in-qubes/vm-sudo.html#replacing-passwordless-root-access); it changes every qube that shares that template.
+
+  After taking this package route, verify that no distro-specific grant file remains:
+  ```bash
+  remaining=0
+  for grant in \
+      /etc/sudoers.d/qubes \
+      /etc/polkit-1/rules.d/00-qubes-allow-all.rules \
+      /etc/pam.d/su.qubes \
+      /usr/share/pam-configs/su.qubes; do
+      if [ -e "$grant" ]; then
+          printf 'grant remains: %s\n' "$grant" >&2
+          remaining=1
+      fi
+  done
+  test "$remaining" -eq 0
+  ```
+  This must print nothing. Still perform the behavioral checks below: package/file state alone does not prove the three escalation paths are closed.
 - **Per-qube, with maintenance required:** leave the package in the shared template and run `gpasswd -d user qubes` from `/rw/config/rc.local` on every boot. Every grant keys on the group, so this closes all three without changing sibling qubes.
 
 Do **not** treat a one-time group edit in the template as durable. In the Qubes 4.3 Fedora packaging, the main core-agent package's `%pre` runs `usermod -a ... --groups qubes` even on upgrades, before its update-only early exit, so a later template update silently re-adds the user and revives all three grants. The group also owns the UpdateVM's `/var/lib/qubes/dom0-updates` staging directory; removing membership can break dom0 update downloads. Do not use the group-removal route on a qube that is, or may become, the UpdateVM.
