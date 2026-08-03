@@ -145,7 +145,7 @@ Codified from steps that drove real migrations. Every generated step should:
 
 ### Trap 2 — *Minimal* templates don't have passwordless sudo
 
-Full templates ship `qubes-core-agent-passwordless-root`, and an AppVM's `/etc` comes from its template — so a default AppVM has passwordless sudo *because its template does*. **Minimal** templates (`debian-13-minimal`, `fedora-minimal`) omit the package, so the minimal template itself and any qube based on it will prompt for a password that was never set. Don't direct the user to open a terminal there and run `sudo`. Run as root from dom0 instead:
+Full templates ship `qubes-core-agent-passwordless-root`, and an AppVM's `/etc` comes from its template — so a default AppVM has passwordless sudo *because its template does*. **Minimal** templates (`debian-13-minimal`, `fedora-<release>-minimal`) omit the package, so the minimal template itself and any qube based on it will prompt for a password that was never set. Don't direct the user to open a terminal there and run `sudo`. Run as root from dom0 instead:
 ```bash
 qvm-run --pass-io --user root <template-vm> 'bash /path/to/script'
 ```
@@ -270,40 +270,42 @@ qvm-run --pass-io <vm> 'uptime'
 
 Pasting state output beats guessing about idempotency.
 
-### Pattern F — Sudo password on any AppVM holding non-trivial value
+### Pattern F — Remove passwordless root on any AppVM holding non-trivial value
 
-Default is passwordless sudo (`qubes-core-agent-passwordless-root`). Re-enable a password for any AppVM that:
+Default is passwordless root access (`qubes-core-agent-passwordless-root`). Remove that access from any AppVM that:
 
 - Holds data worth defending past the current session (DBs, keys, secrets store), **OR**
 - Has agents / autonomous processes that hold a shell inside it, **OR**
 - Has any inbound shell vector (SSH, even VPN/tailnet-scoped).
 
-Why this matters even on a qube with no remote shell vector: in-qube `user`-shell compromise + sudo escalation enables persistent backdoors via `/rw/config/rc.local` and `qubes-firewall-user-script`, direct PGDATA reads (bypassing Postgres auth), pg_hba.conf rewrites, and LAN-pivot raw-socket primitives. Without sudo, the same compromise is bounded to the current session and the user-readable surface — a real boundary, not security theater.
+Why this matters even on a qube with no remote shell vector: in-qube `user`-shell compromise + passwordless escalation enables persistent backdoors via `/rw/config/rc.local` and `qubes-firewall-user-script`, direct PGDATA reads (bypassing Postgres auth), pg_hba.conf rewrites, and LAN-pivot raw-socket primitives. Without passwordless escalation, the same compromise is bounded to the current session and the user-readable surface unless the attacker also defeats the configured authentication boundary — a real boundary, not security theater.
 
-Procedure — the passwordless grant is not one file. `qubes-core-agent-passwordless-root` installs **three** grants, all keyed on membership of group `qubes` (which the default user is added to at package install):
+Procedure — the passwordless grant is not one file. `qubes-core-agent-passwordless-root` installs **three** grants, all keyed on membership of group `qubes`. The main `qubes-core-agent` package — not the passwordless-root subpackage — adds the default user to that group during install and upgrade:
 
-- `/etc/sudoers.d/qubes` — `%qubes ALL=(ALL) NOPASSWD: ALL`
+- `/etc/sudoers.d/qubes` — `%qubes ALL=(ALL) ROLE=unconfined_r TYPE=unconfined_t NOPASSWD: ALL` on Fedora and Debian
 - `/etc/polkit-1/rules.d/00-qubes-allow-all.rules` — allows **any** polkit action for group `qubes`, so `pkexec bash` is instant root
 - `/etc/pam.d/su.qubes` (plus the Debian pam-config) — `su` with no password
 
 A countermeasure that touches only the sudoers half leaves root one `pkexec` away. And adding your own `/etc/sudoers.d/` drop-in does not even close the sudoers half: `#includedir` reads files lexically and **the last match wins**, so `10-require-auth` (or `00-`, or `50-` — any conventional prefix) sorts *before* `qubes`, whose `NOPASSWD: ALL` then matches last and wins. Nothing errors and `visudo -c` passes; sudo stays passwordless.
 
-Close all three paths at once, either way:
+Close all three paths at once using one of these deliberately different scopes:
 
-- **Remove the package** in the template (`apt-get remove qubes-core-agent-passwordless-root` / `dnf remove qubes-core-agent-passwordless-root`) — Qubes' own documented procedure, or
-- **Drop the user from the group**: `gpasswd -d user qubes` — every grant keys on the group, not the username.
+- **Preferred, durable, template-wide:** remove the package in a dedicated template (`apt-get remove qubes-core-agent-passwordless-root` / `dnf remove qubes-core-agent-passwordless-root`). This is [Qubes' documented route](https://doc.qubes-os.org/en/latest/user/security-in-qubes/vm-sudo.html#replacing-passwordless-root-access) and removes the three grant files; it also changes every qube that shares that template.
+- **Per-qube, with maintenance required:** leave the package in the shared template and run `gpasswd -d user qubes` from `/rw/config/rc.local` on every boot. Every grant keys on the group, so this closes all three without changing sibling qubes.
 
-Then set a password for `user`. Both halves live under `/etc`, which is reset from the template on every AppVM boot: the password hash in `/etc/shadow` and the group membership in `/etc/group`. Neither persists by default — a common trap is to set the password, reboot, and find it gone. Make them stick by doing it in the **template** (AppVMs then inherit), or by re-applying on each boot from `/rw/config/rc.local` (`chpasswd` from a stored hash + `gpasswd -d user qubes`).
+Do **not** treat a one-time group edit in the template as durable. In the Qubes 4.3 Fedora packaging, the main core-agent package's `%pre` runs `usermod -a ... --groups qubes` even on upgrades, before its update-only early exit, so a later template update silently re-adds the user and revives all three grants. The group also owns the UpdateVM's `/var/lib/qubes/dom0-updates` staging directory; removing membership can break dom0 update downloads. Do not use the group-removal route on a qube that is, or may become, the UpdateVM.
+
+If you want an authenticated in-qube admin path rather than refusal, set the required password and configure that path explicitly after removing the passwordless grants. An AppVM's `/etc/shadow` and `/etc/group` reset from its template on every boot: put template-wide state in a dedicated template, or re-apply per-qube state from `/rw/config/rc.local` (`chpasswd` from a stored hash + `gpasswd -d user qubes`). Root administration from dom0 via `qvm-run --user root` remains available either way.
 
 **Verify by negation — all three doors, not just the first:**
 
 ```bash
-sudo -k; sudo id   # must prompt
+sudo -k; sudo id   # must prompt or refuse
 pkexec id          # must prompt (or fail without an authentication agent)
-su -c id           # must prompt
+su -c id           # must prompt or refuse
 ```
 
-Steps are the same whether the value being defended is "agent has the shell" or "DB has the data." Compatible with `qvm-run --user root` from dom0 (which bypasses in-qube authentication entirely — daily admin flow unchanged).
+None may reach `uid=0` without authentication; prompting or refusing is safe. Repeat this check after every boot when using the per-qube route and after every template/core-agent update. Steps are the same whether the value being defended is "agent has the shell" or "DB has the data."
 
 **Don't skip this on the reasoning "but it has no network listener."** Defense in depth here is about *what an in-qube escalation gets you*, not the probability of getting in.
 
