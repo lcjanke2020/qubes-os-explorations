@@ -159,6 +159,6 @@ persistence, fallback wiring — is documented in the
 - [Passing a Modern NVIDIA GPU Through to a Qubes OS HVM](nvidia-gpu-passthrough.md) —
   the GPU qube this pattern was built around.
 - [Locking Down Qube Outbound](tailscale-lan-lockdown.md) — the egress-side counterpart.
-- The [`qubes_setup_assistant` skill](skills/qubes_setup_assistant/SKILL.md) — "Choosing a
+- The [`qubes-setup-assistant` skill](skills/qubes-setup-assistant/SKILL.md) — "Choosing a
   control path" weighs ConnectTCP against dom0 dispatch and ssh for *admin* work; this
   guide is the *service-path* case.
