@@ -1,6 +1,15 @@
 # qubes-os-explorations
 Explorations of the Reasonably Secure Operating System
 
+## Agent skill
+
+- [`qubes-setup-assistant`](skills/qubes-setup-assistant/SKILL.md) — the traps and patterns from
+  these explorations (dom0 as control plane, bind-dirs persistence, template/AppVM sequencing,
+  firewall-rule placement, when to push back on convenience) distilled into a loadable
+  [Agent Skill](https://agentskills.io), so a coding agent helps configure Qubes without walking
+  into them. Ships with `qctl.sh`, a dom0 dispatcher that turns each agent-authored step into one
+  short, reviewable command whose output flows back to the agent's qube automatically.
+
 ## Guides
 
 - [Passing a Modern NVIDIA GPU Through to a Qubes OS HVM](nvidia-gpu-passthrough.md) — the offset-4 / Xen-stubdom guard that fixes the "GPU has fallen off the bus" (Xid 79) failure on modern NVIDIA cards, reproduced end-to-end on an RTX 6000 Ada, plus operational notes (rootfs-resize vs `qrexec_timeout`, `/usr/local` on the private volume).

