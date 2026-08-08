@@ -203,6 +203,28 @@ qvm-shutdown --wait <appvm> && qvm-start <appvm>   # appvm picks up the new snap
 
 If a template change "isn't taking" in an AppVM, this is almost always why.
 
+### Trap 8 — On `lvm_thin`, a volume's `usage` is blocks *allocated*, not filesystem usage
+
+`qvm-volume info <vm>:private` reports `usage` straight from the thin LV's allocation. That is **not** how full the filesystem is. Without periodic `fstrim`, deleted files keep their thin blocks allocated indefinitely, so the number ratchets upward and never comes back down — a qube that has churned through a few GB of browser cache reads as nearly full while its filesystem is mostly empty.
+
+Seen in practice on a browser AppVM: dom0 reported `usage 1988140361` of `size 2147483648` — 92.6%, which reads as "out of space". Booting the qube and running `df` showed **797 MiB of live data**, about 40%. The ~1.1 GiB difference was untrimmed deleted blocks.
+
+Both numbers are correct; they answer different questions:
+
+| Question | Ask | Why |
+|---|---|---|
+| Is this qube running out of room? | `df -h /rw` **inside the running qube** | Live file data is what fills a filesystem |
+| How much pool space is committed? | `qvm-volume info <vm>:private` in dom0 | Allocated blocks are unavailable to other qubes until discarded |
+
+So don't size a volume off the dom0 figure alone. Reclaim with `fstrim -v /rw` inside the qube (online and safe — it discards only blocks the filesystem already treats as free). Expect less back than the gap suggests at first: `revisions_to_keep` snapshots still reference the pre-trim blocks, and those can't return to the pool until the revisions rotate out.
+
+**Why this one bites harder than a mis-read number usually would:** the misleading value feeds a decision that is *one-way*. `qvm-volume resize` grows only — there is no supported shrink, and `qvm-volume revert` restores a volume's **content** from a revision, not its size. Undoing an oversize means backup and recreate. Check `df` inside the qube before picking a number.
+
+While you're in that operation, two related facts worth having:
+
+- **The filesystem follows on the next boot, automatically.** After `qvm-volume resize <vm>:private <bytes>`, `qubes-core-agent`'s `mount-dirs.sh` runs `resize2fs` during startup ("Private device size management: enlarging /dev/xvdb"). Don't write a manual `resize2fs` into a resize procedure — resize, boot, then verify with `df -h /rw` or the `EXT4-fs (xvdb): resized filesystem` line in `journalctl -b`. Only if the filesystem did *not* follow does a manual `resize2fs /dev/xvdb` belong, in its own reviewed step.
+- **For an AppVM, `private` is the volume to grow.** Its `root` is a `snap_on_start` view of the template (`usage 0`, `save_on_stop False`); growing it per-qube accomplishes nothing. Grow the template's `root` if the *template* needs more space.
+
 ## Patterns
 
 ### Pattern A — Clone the template before installing service-specific software
