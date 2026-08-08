@@ -216,7 +216,14 @@ Both numbers are correct; they answer different questions:
 | Is this qube running out of room? | `df -h /rw` **inside the running qube** | Live file data is what fills a filesystem |
 | How much pool space is committed? | `qvm-volume info <vm>:private` in dom0 | Allocated blocks are unavailable to other qubes until discarded |
 
-So don't size a volume off the dom0 figure alone. Reclaim with `fstrim -v /rw` inside the qube (online and safe — it discards only blocks the filesystem already treats as free). Expect less back than the gap suggests at first: `revisions_to_keep` snapshots still reference the pre-trim blocks, and those can't return to the pool until the revisions rotate out.
+So don't size a volume off the dom0 figure alone. Reclaim with `fstrim -v /rw` inside the qube (online and safe — it discards only blocks the filesystem already treats as free).
+
+**Expect the first trim to reclaim exactly nothing, and don't read that as failure.** `revisions_to_keep` snapshots still reference the pre-trim blocks, and dm-thin cannot free a block a snapshot holds. Right after a resize this is total, not partial: the oldest revision is a snapshot of the *entire pre-resize volume*, so it pins essentially every block you were hoping to recover. Measured on the AppVM above, immediately after growing it — allocated bytes were byte-identical before and after the trim. The revisions age out as they rotate (two more clean shutdown/start cycles at the default `revisions_to_keep=2`); trim again then.
+
+Two things that will otherwise mislead you while diagnosing this:
+
+- **`fstrim`'s "N GiB trimmed" is not N GiB reclaimed.** It reports the size of the ranges it issued discards over, and on a freshly-grown volume nearly all of that is never-written space where the discard is a no-op. The run described above cheerfully printed `18 GiB (19354947584 bytes) trimmed` while returning zero blocks to the pool. Trust the before/after `usage`, not that number.
+- **Rule out the other cause before blaming snapshots.** A pool that doesn't pass discards down produces the same symptom — `fstrim` succeeds and nothing is freed. Distinguish them in dom0 with `sudo lvs -o lv_name,discards <vg>/<pool>`: `passdown` means the pool does return blocks (so snapshots are your culprit), `ignore` means the trim can never reclaim anything on that pool. `sudo lvs -o lv_name,lv_size,data_percent,origin <vg>` then shows the snapshot chain and how much each `-back` volume is holding.
 
 **Why this one bites harder than a mis-read number usually would:** the misleading value feeds a decision that is *one-way*. `qvm-volume resize` grows only — there is no supported shrink, and `qvm-volume revert` restores a volume's **content** from a revision, not its size. Undoing an oversize means backup and recreate. Check `df` inside the qube before picking a number.
 
