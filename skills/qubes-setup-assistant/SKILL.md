@@ -203,6 +203,31 @@ qvm-shutdown --wait <appvm> && qvm-start <appvm>   # appvm picks up the new snap
 
 If a template change "isn't taking" in an AppVM, this is almost always why.
 
+### Trap 8 — On `lvm_thin`, a volume's `usage` is blocks *allocated*, not filesystem usage
+
+`qvm-volume info <vm>:private` reports `usage` straight from the thin LV's allocation. That is **not** how full the filesystem is. Deleted files mostly don't return their blocks (why below), so the number ratchets upward over the volume's life — a qube that has churned through a few GB of browser cache reads as nearly full while its filesystem is mostly empty.
+
+Seen in practice on a browser AppVM: dom0 reported `usage 1988140361` of `size 2147483648` — 92.6%, which reads as "out of space". Booting the qube and running `df` showed **797 MiB of live data**, about 40%.
+
+Two properties of the metric to know before measuring anything with it:
+
+- **While the qube runs, `usage` reads the last *committed* LV.** The guest actually writes (and trims) a separate `-snap` LV, which is only committed at clean shutdown. An in-session before/after comparison of `usage` therefore measures nothing, whatever you did in between.
+- **It also understates the qube's total pool footprint — and the footprint can't be computed from `lvs` either.** The `-back` revisions and the running `-snap` retain mappings of their own; `sudo lvs -o lv_name,lv_size,data_percent,origin <vg>` shows which family members still hold mappings. But **don't sum that column**: thin snapshots share chunks, so per-LV `Data%` counts a shared chunk toward every LV that maps it. Per-qube unique attribution isn't available from ordinary `lvs` arithmetic; the numbers that *are* ground truth are the pool's own percentages.
+
+| Question | Ask | Why |
+|---|---|---|
+| Is this qube running out of room? | `df -h /rw` **inside the running qube** | Live file data is what fills a filesystem |
+| Is the pool itself under pressure? | `sudo lvs -o lv_name,data_percent,metadata_percent <vg>/<pool>` — watch **both** | Per-LV figures double-count shared chunks; the pool row is ground truth, and a thin pool fails when *either* percentage hits 100 — metadata can fill faster than data (on the pool measured here: ~20% meta vs ~9% data) |
+
+**Why the gap doesn't come back — and why `fstrim` mostly won't help.** Stock Qubes AppVMs already mount `/rw` with the `discard` option (confirm with `findmnt -no OPTIONS /rw`; where `discard` is *absent* — customized fstab, exotic template — a manual `fstrim` can reclaim whole chunks nothing else references, under the same revision-pinning and `discards`-mode caveats as below), yet the gap accumulates anyway: the pool can only unmap whole **chunks** (`sudo lvs -o lv_name,chunk_size <vg>/<pool>` — 2 MiB on the multi-TB pool measured here; LVM scales it with pool size), and a chunk stays allocated while *any* of its bytes are live. Small-file churn — exactly what a browser profile is — leaves nearly every chunk partially occupied, where neither online discard nor `fstrim` can touch it. Measured end-to-end on the AppVM above: an explicit `fstrim -v /rw` reported `18 GiB trimmed` — that figure counts the ranges *issued*, not blocks reclaimed, and most of it was never-written space where the discard is a no-op — while the volume's mapped size moved by ~2 MB total across the trim, the next shutdown commit, and full rotation of the pre-trim revisions. The one real reclaim event: ~340 MiB returned to the pool when the revision that uniquely held those chunks rotated out (revisions pin their generation's chunks until they age out — one rotation per clean shutdown, default `revisions_to_keep=2`). So read the dom0 figure as a **fragmentation-bound allocated-chunk footprint that mostly ratchets upward** — it *can* fall, but only when whole chunks empty out, so meaningful reclaim comes from deleting large contiguous data, or from backup-and-recreate — not from cache churn plus a trim. One config check before blaming any of this: `sudo lvs -o lv_name,discards <vg>/<pool>` — `passdown` and `nopassdown` both reclaim at the pool (`nopassdown` merely skips notifying the backing device); only `ignore` means discards can never reclaim.
+
+**Why the misread bites: it feeds a decision that hardens quickly.** `qvm-volume resize` is grow-only in practice (`resize --force` accepts a smaller size, but the `lvm_thin` backend refuses the shrink and points advanced users at manual `lvresize`). For a *fresh* oversize there is one Qubes-managed undo, live-tested: `qvm-volume revert` re-creates the volume as a snapshot of a revision, restoring content **and size** together (grown 2→4 GiB, reverted, size back at 2 GiB) — at the cost of everything written since that revision. That window closes as revisions rotate out; after that, backup-and-recreate is the conservative route (the manual `lvresize` path exists for those who can shrink the filesystem first and accept the risk of getting it destructively wrong). Check `df` inside the qube before picking a number.
+
+Two adjacent facts for the resize itself:
+
+- **The filesystem follows automatically** — immediately via the `qubes.ResizeDisk` service if the qube is running, else on its next boot (`mount-dirs.sh`: "Private device size management: enlarging /dev/xvdb" → `resize2fs`). Don't write a manual `resize2fs` into a resize procedure; verify with `df -h /rw` afterwards instead.
+- **For an AppVM, `private` is the volume to grow.** Its `root` is a `snap_on_start` view of the template (`usage 0`, `save_on_stop False`); growing it per-qube accomplishes nothing. Grow the template's `root` if the *template* needs more space.
+
 ## Patterns
 
 ### Pattern A — Clone the template before installing service-specific software
