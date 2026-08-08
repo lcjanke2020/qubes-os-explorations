@@ -205,31 +205,27 @@ If a template change "isn't taking" in an AppVM, this is almost always why.
 
 ### Trap 8 — On `lvm_thin`, a volume's `usage` is blocks *allocated*, not filesystem usage
 
-`qvm-volume info <vm>:private` reports `usage` straight from the thin LV's allocation. That is **not** how full the filesystem is. Without periodic `fstrim`, deleted files keep their thin blocks allocated indefinitely, so the number ratchets upward and never comes back down — a qube that has churned through a few GB of browser cache reads as nearly full while its filesystem is mostly empty.
+`qvm-volume info <vm>:private` reports `usage` straight from the thin LV's allocation. That is **not** how full the filesystem is. Deleted files mostly don't return their blocks (why below), so the number ratchets upward over the volume's life — a qube that has churned through a few GB of browser cache reads as nearly full while its filesystem is mostly empty.
 
-Seen in practice on a browser AppVM: dom0 reported `usage 1988140361` of `size 2147483648` — 92.6%, which reads as "out of space". Booting the qube and running `df` showed **797 MiB of live data**, about 40%. The ~1.1 GiB difference was untrimmed deleted blocks.
+Seen in practice on a browser AppVM: dom0 reported `usage 1988140361` of `size 2147483648` — 92.6%, which reads as "out of space". Booting the qube and running `df` showed **797 MiB of live data**, about 40%.
 
-Both numbers are correct; they answer different questions:
+Two properties of the metric to know before measuring anything with it:
+
+- **While the qube runs, `usage` reads the last *committed* LV.** The guest actually writes (and trims) a separate `-snap` LV, which is only committed at clean shutdown. An in-session before/after comparison of `usage` therefore measures nothing, whatever you did in between.
+- **It also understates the qube's total pool footprint.** Each `-back` revision (and the running `-snap`) holds its own chunks. `sudo lvs -o lv_name,lv_size,data_percent,origin <vg>` shows the whole family.
 
 | Question | Ask | Why |
 |---|---|---|
 | Is this qube running out of room? | `df -h /rw` **inside the running qube** | Live file data is what fills a filesystem |
-| How much pool space is committed? | `qvm-volume info <vm>:private` in dom0 | Allocated blocks are unavailable to other qubes until discarded |
+| How much pool space does this qube tie up? | `sudo lvs` in dom0 — the volume's whole LV family | `usage` alone omits revisions and the live `-snap` |
 
-So don't size a volume off the dom0 figure alone. Reclaim with `fstrim -v /rw` inside the qube (online and safe — it discards only blocks the filesystem already treats as free).
+**Why the gap doesn't come back — and why `fstrim` mostly won't help.** Stock Qubes AppVMs already mount `/rw` with the `discard` option (confirm with `findmnt -no OPTIONS /rw`), yet the gap accumulates anyway: the pool can only unmap whole **chunks** (`lvs -o chunk_size` — 2 MiB on the multi-TB pool measured here; LVM scales it with pool size), and a chunk stays allocated while *any* of its bytes are live. Small-file churn — exactly what a browser profile is — leaves nearly every chunk partially occupied, where neither online discard nor `fstrim` can touch it. Measured end-to-end on the AppVM above: an explicit `fstrim -v /rw` reported `18 GiB trimmed` — that figure counts the ranges *issued*, not blocks reclaimed, and most of it was never-written space where the discard is a no-op — while the volume's mapped size moved by ~2 MB total across the trim, the next shutdown commit, and full rotation of the pre-trim revisions. The one real reclaim event: ~340 MiB returned to the pool when the revision that uniquely held those chunks rotated out (revisions pin their generation's chunks until they age out — one rotation per clean shutdown, default `revisions_to_keep=2`). So treat the dom0 figure as a **chunk-footprint high-water mark**: meaningful reclaim comes from deleting large contiguous data, or from backup-and-recreate — not from cache churn plus a trim. One config check before blaming any of this: `sudo lvs -o lv_name,discards <vg>/<pool>` — `passdown` and `nopassdown` both reclaim at the pool (`nopassdown` merely skips notifying the backing device); only `ignore` means discards can never reclaim.
 
-**Expect the first trim to reclaim exactly nothing, and don't read that as failure.** `revisions_to_keep` snapshots still reference the pre-trim blocks, and dm-thin cannot free a block a snapshot holds. Right after a resize this is total, not partial: the oldest revision is a snapshot of the *entire pre-resize volume*, so it pins essentially every block you were hoping to recover. Measured on the AppVM above, immediately after growing it — allocated bytes were byte-identical before and after the trim. The revisions age out as they rotate (two more clean shutdown/start cycles at the default `revisions_to_keep=2`); trim again then.
+**Why the misread bites: it feeds a decision that hardens quickly.** `qvm-volume resize` is grow-only in practice (`resize --force` accepts a smaller size, but the `lvm_thin` backend refuses the shrink and points advanced users at manual `lvresize`). For a *fresh* oversize there is exactly one undo, live-tested: `qvm-volume revert` re-creates the volume as a snapshot of a revision, restoring content **and size** together (grown 2→4 GiB, reverted, size back at 2 GiB) — at the cost of everything written since that revision. That window closes as revisions rotate out; after that, undoing an oversize means backup and recreate. Check `df` inside the qube before picking a number.
 
-Two things that will otherwise mislead you while diagnosing this:
+Two adjacent facts for the resize itself:
 
-- **`fstrim`'s "N GiB trimmed" is not N GiB reclaimed.** It reports the size of the ranges it issued discards over, and on a freshly-grown volume nearly all of that is never-written space where the discard is a no-op. The run described above cheerfully printed `18 GiB (19354947584 bytes) trimmed` while returning zero blocks to the pool. Trust the before/after `usage`, not that number.
-- **Rule out the other cause before blaming snapshots.** A pool that doesn't pass discards down produces the same symptom — `fstrim` succeeds and nothing is freed. Distinguish them in dom0 with `sudo lvs -o lv_name,discards <vg>/<pool>`: `passdown` means the pool does return blocks (so snapshots are your culprit), `ignore` means the trim can never reclaim anything on that pool. `sudo lvs -o lv_name,lv_size,data_percent,origin <vg>` then shows the snapshot chain and how much each `-back` volume is holding.
-
-**Why this one bites harder than a mis-read number usually would:** the misleading value feeds a decision that is *one-way*. `qvm-volume resize` grows only — there is no supported shrink, and `qvm-volume revert` restores a volume's **content** from a revision, not its size. Undoing an oversize means backup and recreate. Check `df` inside the qube before picking a number.
-
-While you're in that operation, two related facts worth having:
-
-- **The filesystem follows on the next boot, automatically.** After `qvm-volume resize <vm>:private <bytes>`, `qubes-core-agent`'s `mount-dirs.sh` runs `resize2fs` during startup ("Private device size management: enlarging /dev/xvdb"). Don't write a manual `resize2fs` into a resize procedure — resize, boot, then verify with `df -h /rw` or the `EXT4-fs (xvdb): resized filesystem` line in `journalctl -b`. Only if the filesystem did *not* follow does a manual `resize2fs /dev/xvdb` belong, in its own reviewed step.
+- **The filesystem follows automatically** — immediately via the `qubes.ResizeDisk` service if the qube is running, else on its next boot (`mount-dirs.sh`: "Private device size management: enlarging /dev/xvdb" → `resize2fs`). Don't write a manual `resize2fs` into a resize procedure; verify with `df -h /rw` afterwards instead.
 - **For an AppVM, `private` is the volume to grow.** Its `root` is a `snap_on_start` view of the template (`usage 0`, `save_on_stop False`); growing it per-qube accomplishes nothing. Grow the template's `root` if the *template* needs more space.
 
 ## Patterns
