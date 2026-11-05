@@ -386,7 +386,7 @@ Close all three paths at once using one of these deliberately different scopes:
 
   One lasting consequence on either distribution: the template no longer carries `qubes-vm-recommended`, so a package that a later Qubes release adds to that meta-package will not arrive by itself.
 
-  After taking this package route, verify that no distro-specific grant file remains:
+  After taking this package route, verify that no grant remains, as a file or as a PAM rule:
   ```bash
   remaining=0
   for grant in \
@@ -399,9 +399,13 @@ Close all three paths at once using one of these deliberately different scopes:
           remaining=1
       fi
   done
+  if grep -rn 'ingroup qubes' /etc/pam.d/ >&2; then
+      printf 'grant remains: the PAM rule above\n' >&2
+      remaining=1
+  fi
   test "$remaining" -eq 0
   ```
-  This must print nothing. So must `grep -rn 'ingroup qubes' /etc/pam.d/`: on Debian the `su` grant is a line that `pam-auth-update` wrote into `common-auth`, not a file of its own, and it can outlive the profile if that file was edited by hand. Still perform the behavioral checks below: package/file state alone does not prove the three escalation paths are closed.
+  This must print nothing and exit 0. The `grep` is part of the check because on Debian the `su` grant is a line that `pam-auth-update` wrote into `common-auth`, not a file of its own, and it can outlive the profile if that file was edited by hand. Still perform the behavioral checks below: package/file state alone does not prove the three escalation paths are closed.
 - **Per-qube, with maintenance required:** leave the package in the shared template and run `gpasswd -d user qubes` from `/rw/config/rc.local` on every boot. Every grant keys on the group, so this closes all three without changing sibling qubes.
 
 Do **not** treat a one-time group edit in the template as durable. In the Qubes 4.3 Fedora packaging, the main core-agent package's `%pre` runs `usermod -a ... --groups qubes` even on upgrades, before its update-only early exit, so a later template update silently re-adds the user and revives all three grants. The group also owns the UpdateVM's `/var/lib/qubes/dom0-updates` staging directory; removing membership can break dom0 update downloads. Do not use the group-removal route on a qube that is, or may become, the UpdateVM.
