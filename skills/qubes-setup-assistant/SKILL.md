@@ -309,20 +309,84 @@ Procedure — the passwordless grant is not one file. `qubes-core-agent-password
 
 - `/etc/sudoers.d/qubes` — `%qubes ALL=(ALL) ROLE=unconfined_r TYPE=unconfined_t NOPASSWD: ALL` on Fedora and Debian
 - `/etc/polkit-1/rules.d/00-qubes-allow-all.rules` — allows **any** polkit action for group `qubes`, so `pkexec bash` is instant root
-- `/etc/pam.d/su.qubes` (plus the Debian pam-config) — `su` with no password
+- A PAM rule for `su` — `su` with no password. On Fedora `/etc/pam.d/su` becomes a symlink to `/etc/pam.d/su.qubes`. On Debian the profile `/usr/share/pam-configs/su.qubes` is merged into `/etc/pam.d/common-auth` by `pam-auth-update`; there is no `/etc/pam.d/su.qubes` to find, so a check for that filename passes while the grant is live
 
-A countermeasure that touches only the sudoers half leaves root one `pkexec` away. And adding your own `/etc/sudoers.d/` drop-in does not even close the sudoers half: `#includedir` reads files lexically and **the last match wins**, so `10-require-auth` (or `00-`, or `50-` — any conventional prefix) sorts *before* `qubes`, whose `NOPASSWD: ALL` then matches last and wins. Nothing errors and `visudo -c` passes; sudo stays passwordless.
+A countermeasure that touches only the sudoers half leaves root one `pkexec` or one `su` away. And adding your own `/etc/sudoers.d/` drop-in does not even close the sudoers half: `#includedir` reads files lexically and **the last match wins**, so `10-require-auth` (or `00-`, or `50-` — any conventional prefix) sorts *before* `qubes`, whose `NOPASSWD: ALL` then matches last and wins. Nothing errors and the syntax check passes; sudo stays passwordless.
+
+For that syntax check use `visudo -cf /etc/sudoers`, which follows the includes. Plain `visudo -c` also enforces mode 0440 on every included file, and it exits 1 on a Fedora template whatever you changed: the `qubes-input-proxy-sender` package ships `/etc/sudoers.d/qubes-input-trigger` as 0600 there (Debian ships it 0440; sudo itself accepts either). Measured on Qubes 4.3 / Fedora 43. A script that gates on plain `visudo -c` reports a failure that is not one.
 
 Close all three paths at once using one of these deliberately different scopes:
 
-- **Preferred, durable, template-wide:** remove the package in a dedicated template, using purge on Debian:
-  ```bash
-  apt-get purge qubes-core-agent-passwordless-root   # Debian
-  dnf remove qubes-core-agent-passwordless-root     # Fedora
-  ```
-  On Debian, plain `apt-get remove` is insufficient: `/etc/sudoers.d/qubes` and `/etc/polkit-1/rules.d/00-qubes-allow-all.rules` are conffiles, so ordinary removal preserves both active root grants. Purge removes them. This is [Qubes' documented package-removal route](https://doc.qubes-os.org/en/latest/user/security-in-qubes/vm-sudo.html#replacing-passwordless-root-access); it changes every qube that shares that template.
+- **Preferred, durable, template-wide:** remove the package in a dedicated template. This is [Qubes' documented package-removal route](https://doc.qubes-os.org/en/latest/user/security-in-qubes/vm-sudo.html#replacing-passwordless-root-access); it changes every qube that shares that template, each at its next boot after the template has shut down (Trap 7).
 
-  After taking this package route, verify that no distro-specific grant file remains:
+  **Do not run the bare removal on a full template.** The `qubes-vm-recommended` meta-package depends on `qubes-core-agent-passwordless-root`, so removing the package removes the meta-package with it. On a full template the other Qubes agent packages are installed *as that meta-package's dependencies*, and once it is gone the package manager counts them as unused:
+
+  - **Fedora:** `dnf remove` sweeps unused dependencies in the same transaction. Measured on a Qubes 4.3 Fedora 43 full template: the bare command proposed removing **87 packages**, among them `qubes-core-agent-networking` (the qube's own IP, DNS and gateway setup), `qubes-core-agent-dom0-updates` and the salt management connector.
+  - **Debian:** `apt-get purge` removes only the two packages, but flags the rest "no longer required". Measured on a Debian 13 qube: about 100 packages, among them `qubes-core-agent-dom0-updates`, the salt connector and `python3-apt`, would go with the next `apt autoremove`.
+
+  The cure is the same on both: before removing, mark what the meta-package pulled in as explicitly installed, starting from the meta-package's own dependency list, and do not remove until a dry run shows only the two packages.
+
+  Fedora (dnf5, the default from Fedora 41):
+  ```bash
+  # 1. Baseline, before anything changes: what autoremove would already take today.
+  dnf autoremove --assumeno
+
+  # 2. Dry run of the removal. The "Removing unused dependencies" list is the problem.
+  dnf remove --assumeno qubes-core-agent-passwordless-root
+
+  # 3. First batch of marks: what the meta-package requires and recommends.
+  #    From the rpm output drop the rpmlib(...) lines and the package being removed;
+  #    for a line written "(A if B)" use A. dnf marks nothing if any name fails to
+  #    match, and says which: drop that name (it is not installed) and run it again.
+  rpm -q --requires --recommends qubes-vm-recommended
+  dnf mark user <name> [<name> ...]
+
+  # 4. Dry run again. If "Removing unused dependencies" still lists packages, mark
+  #    those package names too and repeat. Go on only when the transaction is exactly
+  #    two packages: qubes-core-agent-passwordless-root and qubes-vm-recommended.
+  dnf remove --assumeno qubes-core-agent-passwordless-root
+
+  # 5. Remove. --no-autoremove is a second guard, not a substitute for the marks:
+  #    without them a later `dnf autoremove` sweeps the rest, and a `dnf remove` of
+  #    the last package that still needs one of them takes that one too.
+  dnf remove --no-autoremove qubes-core-agent-passwordless-root
+
+  # 6. Must list exactly what step 1 listed.
+  dnf autoremove --assumeno
+  ```
+  The requirement list in step 3 is not yet a list of packages. It carries `rpmlib(...)` feature lines, which are not packages. A name can be virtual (`pulseaudio-daemon`, `desktop-notification-daemon`): pass it to `dnf mark user` as it is, and dnf marks every installed provider, which can be more than one. `--recommends` is there because the dry run cannot show everything. It lists only what would go now; a weak dependency, or any package that something else on the template still needs, is not listed, and would go later together with that something. So take the first batch from the meta-package's own list, and use the dry run for whatever that list missed. Do not add `--skip-unavailable` to `dnf mark`: it turns a mistyped or badly quoted name into a one-line warning and exit status 0, and leaves that name unmarked.
+
+  Each `--assumeno` dry run that has something to show ends with `Operation aborted by the user.` and exit status 1. That is the expected outcome, not a failure. In a non-interactive step pass `-y` to `dnf mark` and to the final `dnf remove`, which otherwise stop at a prompt. On dnf4 (Fedora 40 and earlier) the corresponding forms are `dnf mark install` and `--noautoremove`; those were not tested here.
+
+  Debian:
+  ```bash
+  # 1. Baseline, before anything changes: what autoremove would already take today.
+  apt-get -s autoremove
+
+  # 2. Mark what the meta-package depends on as manual. The Depends field is one
+  #    comma-separated line, so split it first. Leave out the package being removed
+  #    and any name that is not installed.
+  dpkg-query -W -f='${Depends}\n' qubes-vm-recommended | tr ',' '\n' | sed 's/([^)]*)//; s/|.*//; s/^ *//; s/ *$//'
+  apt-mark manual <package> [<package> ...]
+
+  # 3. Simulate the worst case. Beyond the two packages it must list nothing that
+  #    step 1 did not already list. If it does, mark those names manual as well and
+  #    simulate again.
+  apt-get -s purge --auto-remove qubes-core-agent-passwordless-root qubes-vm-recommended
+
+  # 4. Purge.
+  apt-get purge qubes-core-agent-passwordless-root qubes-vm-recommended
+
+  # 5. Must list exactly what step 1 listed.
+  apt-get -s autoremove
+  ```
+  The `sed` in step 2 strips version constraints and, where the field offers an alternative written `a | b`, keeps the first name; check which of the two is installed if one appears. If `dpkg-query -W -f='${Recommends}\n' qubes-vm-recommended` prints anything, mark those the same way (it printed nothing on the Debian 13 qube measured here). `apt-mark` is not all-or-nothing the way `dnf mark` is: it marks the names it recognises and reports the rest, so read its output. In a non-interactive step pass `-y` to `apt-get purge`, which otherwise stops at its prompt and removes nothing.
+
+  On Debian, plain `apt-get remove` is insufficient: `/etc/sudoers.d/qubes` and `/etc/polkit-1/rules.d/00-qubes-allow-all.rules` are conffiles, so ordinary removal preserves both active root grants. Purge removes them.
+
+  One lasting consequence on either distribution: the template no longer carries `qubes-vm-recommended`, so a package that a later Qubes release adds to that meta-package will not arrive by itself.
+
+  After taking this package route, verify that no grant remains, as a file or as a PAM rule:
   ```bash
   remaining=0
   for grant in \
@@ -335,9 +399,16 @@ Close all three paths at once using one of these deliberately different scopes:
           remaining=1
       fi
   done
+  pam=0
+  grep -rnE '(^|[[:space:]])ingroup[[:space:]]+qubes([[:space:]]|$)' /etc/pam.d/ >&2 || pam=$?
+  case "$pam" in
+      0) printf 'grant remains: the PAM rule above\n' >&2; remaining=1 ;;
+      1) ;;
+      *) printf 'PAM check could not complete (grep status %s)\n' "$pam" >&2; remaining=1 ;;
+  esac
   test "$remaining" -eq 0
   ```
-  This must print nothing. Still perform the behavioral checks below: package/file state alone does not prove the three escalation paths are closed.
+  This must print nothing and exit 0. The `grep` is part of the check because on Debian the `su` grant is a line that `pam-auth-update` wrote into `common-auth`, not a file of its own, and it can outlive the profile if that file was edited by hand. The pattern allows any whitespace between the words, since PAM does. A `grep` that could not read everything counts as a failure, not as clean: it exits 2 in that case even when it also printed a match. Still perform the behavioral checks below: package/file state alone does not prove the three escalation paths are closed.
 - **Per-qube, with maintenance required:** leave the package in the shared template and run `gpasswd -d user qubes` from `/rw/config/rc.local` on every boot. Every grant keys on the group, so this closes all three without changing sibling qubes.
 
 Do **not** treat a one-time group edit in the template as durable. In the Qubes 4.3 Fedora packaging, the main core-agent package's `%pre` runs `usermod -a ... --groups qubes` even on upgrades, before its update-only early exit, so a later template update silently re-adds the user and revives all three grants. The group also owns the UpdateVM's `/var/lib/qubes/dom0-updates` staging directory; removing membership can break dom0 update downloads. Do not use the group-removal route on a qube that is, or may become, the UpdateVM.
