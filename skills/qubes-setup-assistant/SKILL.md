@@ -360,21 +360,28 @@ Close all three paths at once using one of these deliberately different scopes:
 
   Debian:
   ```bash
-  # 1. Baseline: what autoremove would already take today.
+  # 1. Baseline, before anything changes: what autoremove would already take today.
   apt-get -s autoremove
 
-  # 2. List what the meta-package depends on, then mark each installed one as manual
-  #    (every name except qubes-core-agent-passwordless-root itself).
-  dpkg-query -W -f='${Depends}\n' qubes-vm-recommended
+  # 2. Mark what the meta-package depends on as manual. The Depends field is one
+  #    comma-separated line, so split it first. Leave out the package being removed
+  #    and any name that is not installed.
+  dpkg-query -W -f='${Depends}\n' qubes-vm-recommended | tr ',' '\n' | sed 's/([^)]*)//; s/|.*//; s/^ *//; s/ *$//'
   apt-mark manual <package> [<package> ...]
 
-  # 3. Simulate the worst case. Beyond the two packages it must list nothing
-  #    that step 1 did not already list.
+  # 3. Simulate the worst case. Beyond the two packages it must list nothing that
+  #    step 1 did not already list. If it does, mark those names manual as well and
+  #    simulate again.
   apt-get -s purge --auto-remove qubes-core-agent-passwordless-root qubes-vm-recommended
 
   # 4. Purge.
   apt-get purge qubes-core-agent-passwordless-root qubes-vm-recommended
+
+  # 5. Must list exactly what step 1 listed.
+  apt-get -s autoremove
   ```
+  The `sed` in step 2 strips version constraints and, where the field offers an alternative written `a | b`, keeps the first name; check which of the two is installed if one appears. If `dpkg-query -W -f='${Recommends}\n' qubes-vm-recommended` prints anything, mark those the same way (it printed nothing on the Debian 13 qube measured here). `apt-mark` is not all-or-nothing the way `dnf mark` is: it marks the names it recognises and reports the rest, so read its output. In a non-interactive step pass `-y` to `apt-get purge`, which otherwise stops at its prompt and removes nothing.
+
   On Debian, plain `apt-get remove` is insufficient: `/etc/sudoers.d/qubes` and `/etc/polkit-1/rules.d/00-qubes-allow-all.rules` are conffiles, so ordinary removal preserves both active root grants. Purge removes them.
 
   One lasting consequence on either distribution: the template no longer carries `qubes-vm-recommended`, so a package that a later Qubes release adds to that meta-package will not arrive by itself.
