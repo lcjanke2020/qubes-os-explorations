@@ -324,30 +324,39 @@ Close all three paths at once using one of these deliberately different scopes:
   - **Fedora:** `dnf remove` sweeps unused dependencies in the same transaction. Measured on a Qubes 4.3 Fedora 43 full template: the bare command proposed removing **87 packages**, among them `qubes-core-agent-networking` (the qube's own IP, DNS and gateway setup), `qubes-core-agent-dom0-updates` and the salt management connector.
   - **Debian:** `apt-get purge` removes only the two packages, but flags the rest "no longer required". Measured on a Debian 13 qube: about 100 packages, among them `qubes-core-agent-dom0-updates`, the salt connector and `python3-apt`, would go with the next `apt autoremove`.
 
-  The cure is the same on both: before removing, mark what the meta-package pulled in as explicitly installed, and let a dry run tell you when you have marked enough.
+  The cure is the same on both: before removing, mark what the meta-package pulled in as explicitly installed, starting from the meta-package's own dependency list, and do not remove until a dry run shows only the two packages.
 
   Fedora (dnf5, the default from Fedora 41):
   ```bash
-  # 1. Dry run; changes nothing. The "Removing unused dependencies" list is the problem.
+  # 1. Baseline, before anything changes: what autoremove would already take today.
+  dnf autoremove --assumeno
+
+  # 2. Dry run of the removal. The "Removing unused dependencies" list is the problem.
   dnf remove --assumeno qubes-core-agent-passwordless-root
 
-  # 2. List what the meta-package requires, then mark each installed one as user-installed
-  #    (every name except qubes-core-agent-passwordless-root itself).
-  rpm -q --requires qubes-vm-recommended
-  dnf mark user <package> [<package> ...]
+  # 3. First batch of marks: what the meta-package requires and recommends.
+  #    From the rpm output drop the rpmlib(...) lines and the package being removed;
+  #    for a line written "(A if B)" use A. dnf marks nothing if any name fails to
+  #    match, and says which: drop that name (it is not installed) and run it again.
+  rpm -q --requires --recommends qubes-vm-recommended
+  dnf mark user <name> [<name> ...]
 
-  # 3. Dry run again. Repeat step 2 until the transaction is exactly two packages:
-  #    qubes-core-agent-passwordless-root and qubes-vm-recommended.
+  # 4. Dry run again. If "Removing unused dependencies" still lists packages, mark
+  #    those package names too and repeat. Go on only when the transaction is exactly
+  #    two packages: qubes-core-agent-passwordless-root and qubes-vm-recommended.
   dnf remove --assumeno qubes-core-agent-passwordless-root
 
-  # 4. Remove. --no-autoremove is a second guard, not a substitute for the marks:
-  #    without them a later `dnf autoremove`, or `dnf remove <anything>`, sweeps the rest.
+  # 5. Remove. --no-autoremove is a second guard, not a substitute for the marks:
+  #    without them a later `dnf autoremove` sweeps the rest, and a `dnf remove` of
+  #    the last package that still needs one of them takes that one too.
   dnf remove --no-autoremove qubes-core-agent-passwordless-root
 
-  # 5. Nothing may have become removable that was not before.
+  # 6. Must list exactly what step 1 listed.
   dnf autoremove --assumeno
   ```
-  Step 2 is less mechanical than it looks. A requirement can be a virtual name (`pulseaudio-daemon`, `desktop-notification-daemon`): `rpm -q --whatprovides <name>` gives the installed package to mark. A requirement written `(A if B)` applies only when `B` is installed; if it is, mark `A`. The second dry run catches whatever was missed. In a non-interactive step pass `-y` to `dnf mark` and to the final `dnf remove`, which otherwise stop at a prompt. On dnf4 (Fedora 40 and earlier) the corresponding forms are `dnf mark install` and `--noautoremove`; those were not tested here.
+  The requirement list in step 3 is not yet a list of packages. It carries `rpmlib(...)` feature lines, which are not packages. A name can be virtual (`pulseaudio-daemon`, `desktop-notification-daemon`): pass it to `dnf mark user` as it is, and dnf marks every installed provider, which can be more than one. `--recommends` is there because the dry run cannot show everything. It lists only what would go now; a weak dependency, or any package that something else on the template still needs, is not listed, and would go later together with that something. So take the first batch from the meta-package's own list, and use the dry run for whatever that list missed. Do not add `--skip-unavailable` to `dnf mark`: it turns a mistyped or badly quoted name into a silent skip with exit status 0.
+
+  Each `--assumeno` dry run that has something to show ends with `Operation aborted by the user.` and exit status 1. That is the expected outcome, not a failure. In a non-interactive step pass `-y` to `dnf mark` and to the final `dnf remove`, which otherwise stop at a prompt. On dnf4 (Fedora 40 and earlier) the corresponding forms are `dnf mark install` and `--noautoremove`; those were not tested here.
 
   Debian:
   ```bash
