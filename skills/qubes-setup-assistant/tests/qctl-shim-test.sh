@@ -109,7 +109,7 @@ runq dom0-step 0 QCTL_WORK=wq QCTL_SRC_DIR="$WQ" -- dom0 s-dom0
 check "BEGIN banner" grep -q "^\[qctl\] BEGIN v1.1.0 target=dom0 step=s-dom0 work=wq user=default src=$WQ$" "$T/dom0-step.stdout"
 check "archive call: --no-gui, no --user, moves old .out aside" grep -q "^qvm-run --no-gui --pass-io wq \[ ! -e '$WQ/s-dom0.out' \] || mv -f '$WQ/s-dom0.out' '$WQ/s-dom0.out.prev'" "$T/argv.log"
 check "pull: --no-gui, no --user" grep -q "^qvm-run --no-gui --pass-io wq cat '$WQ/s-dom0.sh'$" "$T/argv.log"
-check "ship writes .part, checks size, renames" grep -q "^qvm-run --no-gui --pass-io wq cat > '$WQ/s-dom0.out.part' && \[ \"\$(wc -c < '$WQ/s-dom0.out.part')\" -eq [0-9]* \] && chmod 0644 '$WQ/s-dom0.out.part' && mv -f '$WQ/s-dom0.out.part' '$WQ/s-dom0.out' || { rm -f '$WQ/s-dom0.out.part'; exit 1; }$" "$T/argv.log"
+check "ship writes .part, checks size, renames" grep -q "^qvm-run --no-gui --pass-io wq umask 077; cat > '$WQ/s-dom0.out.part' && \[ \"\$(wc -c < '$WQ/s-dom0.out.part')\" -eq [0-9]* \] && chmod 0644 '$WQ/s-dom0.out.part' && mv -f '$WQ/s-dom0.out.part' '$WQ/s-dom0.out' || { rm -f '$WQ/s-dom0.out.part'; exit 1; }$" "$T/argv.log"
 check ".out exists" test -s "$WQ/s-dom0.out"
 check ".out line 1 = hello" first_line_is "$WQ/s-dom0.out" hello
 check "footer on its own line" has_footer "$WQ/s-dom0.out" s-dom0 dom0 0
@@ -129,7 +129,7 @@ check "BEGIN shows user" grep -q "^\[qctl\] BEGIN v1.1.0 target=myvm step=s-vm w
 check "archive call uses --user agent" grep -q "^qvm-run --no-gui --pass-io --user agent wq \[ ! -e '$AH/s-vm.out' \]" "$T/argv.log"
 check "pull uses --user agent" grep -q "^qvm-run --no-gui --pass-io --user agent wq cat '$AH/s-vm.sh'$" "$T/argv.log"
 check "in-VM run is --no-gui --pass-io --user root" grep -q "^qvm-run --no-gui --pass-io --user root myvm T=" "$T/argv.log"
-check "ship uses --user agent and mode 0600" grep -q "^qvm-run --no-gui --pass-io --user agent wq cat > '$AH/s-vm.out.part' && .* chmod 0600 '$AH/s-vm.out.part' && mv -f" "$T/argv.log"
+check "ship uses --user agent and mode 0600" grep -q "^qvm-run --no-gui --pass-io --user agent wq umask 077; cat > '$AH/s-vm.out.part' && .* chmod 0600 '$AH/s-vm.out.part' && mv -f" "$T/argv.log"
 check "qvm-start called" grep -q '^qvm-start --skip-if-running myvm$' "$T/argv.log"
 check "footer rc=7" has_footer "$AH/s-vm.out" s-vm myvm 7
 check "step output present" grep -qx first-run "$AH/s-vm.out"
