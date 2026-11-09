@@ -63,7 +63,7 @@ shred -u /home/user/QubesIncoming/dom0/out.txt
 
 ### The `qctl` helper — scripted control-plane (agent-driven)
 
-When an **agent in an app qube** is driving the work (it can't reach dom0 at all, and dom0 has no clipboard in or out), wrap the streaming pattern in a tiny dom0 helper so every step is one short, reviewable command and results flow back to the agent automatically. See [`qctl.sh`](qctl.sh) in this skill folder — current version `1.1.0`; the script carries a `QCTL_VERSION` constant and a changelog in its header.
+When an **agent in an app qube** is driving the work (it can't reach dom0 at all, and dom0 has no clipboard in or out), wrap the streaming pattern in a tiny dom0 helper so every step is one short, reviewable command and results flow back to the agent automatically. See [`qctl.sh`](qctl.sh) in this skill folder — current version `1.1.0`; the script carries a `QCTL_VERSION` constant and a changelog in its header. [`tests/qctl-shim-test.sh`](tests/qctl-shim-test.sh) dry-runs it against fake `qvm-*` commands (no qube involved); run it after any change to the helper.
 
 Model:
 - The agent stages files into a **staging directory on its work qube**: `qctl.sh` itself **once** (so the install one-liner below can pull it), then each `<step>.sh`. `qctl` pulls `<step>.sh` from that directory and ships `<step>.out` back into it. The directory is `/tmp/qctl` by default; which layout to use depends on the account the agent runs as — see "Staging directory" below.

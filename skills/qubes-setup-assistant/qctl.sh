@@ -105,10 +105,14 @@
 # normal part of this skill) — qctl just announces it loudly before running.
 #
 # Changelog
-#   1.1.0  QCTL_SRC_DIR and QCTL_WORK_USER (agent-home staging on multi-account
-#          work qubes); --no-gui on the in-qube run (a qube whose X server is
-#          stuck no longer hangs every step); --version/--help; BEGIN banner in
-#          dom0 and END footer in the shipped output.
+#   1.1.0  QCTL_SRC_DIR (absolute) and QCTL_WORK_USER (agent-home staging on
+#          multi-account work qubes; output shipped 0600 under a work user);
+#          --no-gui on every qvm-run (a qube whose X server is stuck, or a
+#          headless work qube, no longer hangs a step); --version/--help, exit 2
+#          on a usage error; BEGIN banner in dom0 and END footer in the shipped
+#          output; delivery via <step>.out.part with a byte-count check and
+#          rename, so <step>.out is never partial; the previous output moves to
+#          <step>.out.prev before each run; tests/qctl-shim-test.sh.
 #   1.0.0  The script as shipped before versioning: target guard v2, tmpfile
 #          execution on both paths, distinct exit codes 1-5.
 QCTL_VERSION="1.1.0"
