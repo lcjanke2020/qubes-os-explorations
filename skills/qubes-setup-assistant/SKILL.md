@@ -74,7 +74,7 @@ Model:
   bash ~/qctl --version        # "qctl 1.1.0" — must match the copy in this skill
   ```
   A stale dom0 copy is otherwise invisible: a step's output looks the same whichever helper ran it. Re-pull after this skill updates `qctl.sh`.
-- Thereafter each step is `bash ~/qctl <target-vm|dom0> <step-name>`. `qctl` prints a `[qctl] BEGIN …` line with the effective target, step, work qube, user and staging directory (a wrong export is caught by eye before anything runs), pulls the script to a **dom0 tmpfile**, runs it from there (staged into a tmpfile inside the target VM and run as root, or directly in dom0 for `dom0`), appends a one-line `[qctl] END …` footer, and ships the combined output to `<staging-dir>/<step>.out` on the work qube for the agent to read (dom0 copy kept at `/tmp/qctl-<step>.out`). `qctl` exits with the **step's own status**, so a failed step is detectable rather than silently reported as success.
+- Thereafter each step is `bash ~/qctl <target-vm|dom0> <step-name>`. `qctl` prints a `[qctl] BEGIN …` line with the effective target, step, work qube, user and staging directory (a wrong export is caught by eye before anything runs), pulls the script to a **dom0 tmpfile**, runs it from there (staged into a tmpfile inside the target VM and run as root, or directly in dom0 for `dom0`), appends a one-line `[qctl] END …` footer, and ships the combined output to `<staging-dir>/<step>.out` on the work qube for the agent to read — delivered as `<step>.out.part` and renamed into place once the byte count matches, so the file appears whole or not at all (dom0 copy kept at `/tmp/qctl-<step>.out`). `qctl` exits with the **step's own status**, so a failed step is detectable rather than silently reported as success.
 - Every step opens with the **target-guard preamble** and its `QCTL_TARGET=` declaration (see "Target guard" below). `qctl` hard-refuses to dispatch a step whose declaration is missing, malformed, or doesn't match the CLI target (exit 5) — undeclared steps don't run, period.
 
 **Environment.** Three variables, read by `qctl` in dom0 and validated against the same safe character set as the qube and step names:
@@ -98,7 +98,7 @@ Model:
   ```
   Outputs then survive work-qube restarts, nothing is world-readable, and the hand-off needs no `/tmp` at all. `qvm-run --user` runs the command as that account through qrexec; the account must exist on the work qube, and no password is involved. Field-tested driving a GPU-qube bring-up of some forty steps from a secondary account.
 
-**Waiting for a step — wake on the file, don't poll.** `qctl` ships `<step>.out` only after the step has exited, so on the work qube the file is either absent or complete; there is never a partial file to tail there. The last line of a complete file is the footer:
+**Waiting for a step — wake on the file, don't poll.** `qctl` ships the output only after the step has exited, and publishes it by renaming a byte-count-verified `<step>.out.part` into place, so on the work qube `<step>.out` is either absent or complete; there is never a partial file to tail there. The last line of a complete file is the footer:
 
 ```
 [qctl] END step=<step> target=<target-vm> rc=<n> version=1.1.0 finished=<UTC timestamp>

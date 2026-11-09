@@ -10,7 +10,10 @@
 # root inside <target-vm> (auto-starting it), or directly in dom0 when the
 # target is the literal word "dom0" — appends a one-line completion footer, and
 # ships the combined output back to <staging-dir>/<step>.out on the WORK qube so
-# the agent can read the result.
+# the agent can read the result. Delivery goes to <step>.out.part first; the byte
+# count is checked against the dom0 copy and the file is then renamed into place,
+# so <step>.out is never partial (a failed or short delivery removes the .part
+# and exits 3 with nothing published).
 # A dom0 copy is left at /tmp/qctl-<step>.out (mode 0600 — dom0 artifacts hold the
 # combined output of root-executed steps and stay private; the work-qube copy is
 # chmodded 0644 for the agent). qctl exits with the STEP's own exit status, so a
@@ -321,12 +324,19 @@ fi
 echo "[qctl] END step=${S} target=${VM} rc=${rc} version=${QCTL_VERSION} finished=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$DOM0_OUT"
 
 echo "[qctl] shipping output back to ${WORK}:${WORK_OUT}"
-# `cat && chmod` (not `;`) so a failed/partial write isn't masked by a successful
-# chmod; chmod 0644 lets the agent read it regardless of the work qube default
-# user's umask (the cross-user hand-off caveat in the header). Capture the ship
-# status — delivery is qctl's contract, so a failure here must not look like success.
+# Deliver into a sibling .part file, verify its byte count against the dom0 copy,
+# set the mode, then rename into place. rename(2) is atomic within one
+# filesystem, so <step>.out never exists in a partial state and a watcher that
+# wakes on its creation reads the complete file. The size check, not cat's exit
+# status, decides publication: cat exits 0 on a stream cut short (EOF is EOF),
+# e.g. when qctl is interrupted mid-transfer. A failed or short delivery removes
+# the .part and leaves nothing under the watched name. chmod 0644 lets the agent
+# read the file regardless of the work qube default user's umask (the cross-user
+# hand-off caveat in the header). Capture the ship status — delivery is qctl's
+# contract, so a failure here must not look like success.
+OUT_SIZE="$(wc -c < "$DOM0_OUT")"
 ship_rc=0
-"${WORK_RUN[@]}" "cat > '$WORK_OUT' && chmod 0644 '$WORK_OUT'" < "$DOM0_OUT" || ship_rc=$?
+"${WORK_RUN[@]}" "cat > '${WORK_OUT}.part' && [ \"\$(wc -c < '${WORK_OUT}.part')\" -eq ${OUT_SIZE} ] && chmod 0644 '${WORK_OUT}.part' && mv -f '${WORK_OUT}.part' '${WORK_OUT}' || { rm -f '${WORK_OUT}.part'; exit 1; }" < "$DOM0_OUT" || ship_rc=$?
 rm -f "$DOM0_TMP"
 if [ "$ship_rc" -ne 0 ]; then
     echo "[qctl] ERROR: failed to ship output back to ${WORK}:${WORK_OUT} (rc=$ship_rc); step rc was $rc. dom0 copy: ${DOM0_OUT}"
