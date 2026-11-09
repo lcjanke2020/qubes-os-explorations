@@ -10,10 +10,11 @@
 # root inside <target-vm> (auto-starting it), or directly in dom0 when the
 # target is the literal word "dom0" — appends a one-line completion footer, and
 # ships the combined output back to <staging-dir>/<step>.out on the WORK qube so
-# the agent can read the result. Delivery goes to <step>.out.part first; the
-# byte count is checked against the dom0 copy and the file is then renamed into
-# place, so <step>.out is never partial (a failed or short delivery removes the
-# .part and exits 3 with nothing published).
+# the agent can read the result. Delivery goes to a mktemp'd sibling
+# <step>.out.XXXXXX.part first; the byte count is checked against the dom0 copy
+# and the file is then renamed into place, so <step>.out is never partial (a
+# failed or short delivery removes the temp file and exits 3 with nothing
+# published).
 # A dom0 copy is left at /tmp/qctl-<step>.out (mode 0600 — dom0 artifacts hold
 # the combined output of root-executed steps and stay private; the work-qube
 # copy is chmodded 0644 for the agent in the default layout, 0600 under
@@ -33,7 +34,7 @@
 #
 # Previous output: qctl's first action on the work qube moves an existing
 # <step>.out to <step>.out.prev (one generation kept) and removes a stale
-# <step>.out.part, before the pull. After any dispatch that reached the work
+# <step>.out.*.part, before the pull. After any dispatch that reached the work
 # qube, <step>.out therefore holds the new result or nothing — a re-dispatched
 # step, or one the target guard refused, never leaves an older run's footer
 # under the name the agent reads. (An agent that arms a watcher on the path
@@ -114,9 +115,10 @@
 #          --no-gui on every qvm-run (a qube whose X server is stuck, or a
 #          headless work qube, no longer hangs a step); --version/--help, exit 2
 #          on a usage error; BEGIN banner in dom0 and END footer in the shipped
-#          output; delivery via <step>.out.part with a byte-count check and
-#          rename, so <step>.out is never partial; the previous output moves to
-#          <step>.out.prev before each run; tests/qctl-shim-test.sh.
+#          output; delivery via a mktemp'd <step>.out.*.part with a byte-count
+#          check and rename, so <step>.out is never partial; the previous
+#          output moves to <step>.out.prev before each run;
+#          tests/qctl-shim-test.sh.
 #   1.0.0  The script as shipped before versioning: target guard v2, tmpfile
 #          execution on both paths, distinct exit codes 1-5.
 QCTL_VERSION="1.1.0"
@@ -194,7 +196,7 @@ echo "[qctl] BEGIN v${QCTL_VERSION} target=${VM} step=${S} work=${WORK} user=${W
 # dispatch that fails at the pull or at the target guard leaves no stale
 # <step>.out behind. `a || b && c` groups as `(a || b) && c`, so a failed mv
 # fails the whole command and is reported.
-if ! "${WORK_RUN[@]}" "[ ! -e '${WORK_OUT}' ] || mv -f '${WORK_OUT}' '${WORK_OUT}.prev' && rm -f '${WORK_OUT}.part'" </dev/null; then
+if ! "${WORK_RUN[@]}" "[ ! -e '${WORK_OUT}' ] || mv -f '${WORK_OUT}' '${WORK_OUT}.prev' && rm -f '${WORK_OUT}.'*'.part'" </dev/null; then
     echo "[qctl] ERROR: could not prepare ${WORK}:${SRC_DIR} (move a previous ${S}.out aside): is ${WORK} running, is qrexec allowed, and does ${WORK_USER:-the default user} own that directory?"
     rm -f "$DOM0_TMP"; exit 1
 fi
@@ -373,26 +375,27 @@ if [ "$footer_rc" -ne 0 ]; then
 fi
 
 echo "[qctl] shipping output back to ${WORK}:${WORK_OUT}"
-# Deliver into a sibling .part file, verify its byte count against the dom0 copy,
-# set the mode, then rename into place. rename(2) is atomic within one
-# filesystem, so <step>.out never exists in a partial state and a watcher that
-# wakes on its creation reads the complete file. The size check, not cat's exit
-# status, decides publication: cat exits 0 on a stream cut short (EOF is EOF),
-# e.g. when qctl is interrupted mid-transfer. A failed or short delivery removes
-# the .part and leaves nothing under the watched name. `umask 077` runs on the
-# work qube first, so the .part is private from the moment it exists — dom0's
-# umask does not cross qrexec, and a chmod after the bytes cannot revoke a read
-# that already happened. `set -C` (noclobber) makes the create exclusive: if
-# something planted a file under the predictable .part name after the prepare
-# step removed it, cat refuses rather than writing into a file that carries
-# someone else's mode, and the ship fails closed (exit 3, dom0 copy kept). The
-# explicit chmod (OUT_MODE, above) then publishes the documented mode, 0644 in
-# the default layout.
+# Deliver into a sibling file that mktemp creates on the work qube —
+# O_CREAT|O_EXCL, mode 0600, unpredictable name <step>.out.XXXXXX.part — verify
+# its byte count against the dom0 copy, set the mode, then rename into place.
+# rename(2) is atomic within one filesystem, so <step>.out never exists in a
+# partial state and a watcher that wakes on its creation reads the complete
+# file; it also replaces whatever sits at <step>.out rather than writing into
+# it. The size check, not cat's exit status, decides publication: cat exits 0
+# on a stream cut short (EOF is EOF), e.g. when qctl is interrupted
+# mid-transfer. A failed or short delivery removes the temp file and leaves
+# nothing under the watched name. mktemp is what makes the create exclusive
+# and private: nothing planted in a shared staging directory — a loose-mode
+# file, a symlink, a FIFO with a reader — can receive the bytes, because the
+# name is not known in advance and an existing name is never opened (dom0's
+# umask does not cross qrexec, and a chmod after the bytes cannot revoke a
+# read that already happened). The explicit chmod (OUT_MODE, above) then
+# publishes the documented mode, 0644 in the default layout.
 # Capture the ship status — delivery is qctl's contract, so a failure here must
 # not look like success.
 OUT_SIZE="$(wc -c < "$DOM0_OUT")"
 ship_rc=0
-"${WORK_RUN[@]}" "umask 077; set -C; cat > '${WORK_OUT}.part' && [ \"\$(wc -c < '${WORK_OUT}.part')\" -eq ${OUT_SIZE} ] && chmod ${OUT_MODE} '${WORK_OUT}.part' && mv -f '${WORK_OUT}.part' '${WORK_OUT}' || { rm -f '${WORK_OUT}.part'; exit 1; }" < "$DOM0_OUT" || ship_rc=$?
+"${WORK_RUN[@]}" "P=\$(mktemp '${WORK_OUT}.XXXXXX.part') && cat > \"\$P\" && [ \"\$(wc -c < \"\$P\")\" -eq ${OUT_SIZE} ] && chmod ${OUT_MODE} \"\$P\" && mv -f \"\$P\" '${WORK_OUT}' || { rm -f \"\$P\"; exit 1; }" < "$DOM0_OUT" || ship_rc=$?
 rm -f "$DOM0_TMP"
 if [ "$ship_rc" -ne 0 ]; then
     echo "[qctl] ERROR: failed to ship output back to ${WORK}:${WORK_OUT} (rc=$ship_rc); step rc was $rc. dom0 copy: ${DOM0_OUT}"
