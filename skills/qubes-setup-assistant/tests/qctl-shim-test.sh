@@ -58,7 +58,11 @@ runq() { # runq <label> <expected-rc> [VAR=value ...] -- <qctl args...>
   local envs=()
   while [ "$1" != "--" ]; do envs+=("$1"); shift; done; shift
   : > "$T/argv.log"
-  env "${envs[@]}" bash "$T/qctl-under-test.sh" "$@" > "$T/$label.stdout" 2>&1; rc=$?
+  # Start from a clean helper configuration: the SKILL tells people to export
+  # QCTL_* in their shells, and an inherited value would turn a default-layout
+  # case into an agent-home one. The shim fault knobs are cleared the same way.
+  env -u QCTL_WORK -u QCTL_SRC_DIR -u QCTL_WORK_USER -u SHIM_SLOW_SHIP -u SHIM_TRUNCATE_SHIP \
+      "${envs[@]}" bash "$T/qctl-under-test.sh" "$@" > "$T/$label.stdout" 2>&1; rc=$?
   if [ "$rc" -eq "$want" ]; then echo "PASS $label (rc=$rc)"; pass=$((pass+1))
   else echo "FAIL $label rc=$rc want=$want"; fail=$((fail+1)); sed 's/^/    /' "$T/$label.stdout"; fi
 }
