@@ -20,8 +20,8 @@
 # failed step is detectable when chaining many of them. Other exit codes are
 # distinct so $? is unambiguous: 1 = couldn't reach the work qube to prepare
 # the staging directory or pull the step script;
-# 2 = bad VM/step/work-qube name, bad QCTL_SRC_DIR/QCTL_WORK_USER (or no such
-# qube); 3 = ran the step but couldn't deliver output back to the work qube
+# 2 = wrong number of arguments, bad VM/step/work-qube name, bad
+# QCTL_SRC_DIR/QCTL_WORK_USER (or no such qube); 3 = ran the step but couldn't deliver output back to the work qube
 # (contract breach); 4 = refused to write through a symlink at the dom0 output
 # path; 5 = target-guard refusal at dispatch (QCTL_TARGET declaration missing,
 # malformed, or not matching the dispatch target). By convention the in-script
@@ -136,7 +136,7 @@ umask 077   # dom0-created files (the tmpfile + /tmp/qctl-<step>.out) hold root
 WORK="${QCTL_WORK:-work-qube}"
 SRC_DIR="${QCTL_SRC_DIR:-/tmp/qctl}"
 WORK_USER="${QCTL_WORK_USER:-}"
-if [ "$#" -ne 2 ]; then usage >&2; exit 1; fi
+if [ "$#" -ne 2 ]; then usage >&2; exit 2; fi
 VM="$1"
 S="$2"
 
