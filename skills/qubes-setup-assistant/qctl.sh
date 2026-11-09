@@ -18,7 +18,8 @@
 # combined output of root-executed steps and stay private; the work-qube copy is
 # chmodded 0644 for the agent). qctl exits with the STEP's own exit status, so a
 # failed step is detectable when chaining many of them. Other exit codes are
-# distinct so $? is unambiguous: 1 = couldn't stage/pull the step script;
+# distinct so $? is unambiguous: 1 = couldn't reach the work qube to prepare
+# the staging directory or pull the step script;
 # 2 = bad VM/step/work-qube name, bad QCTL_SRC_DIR/QCTL_WORK_USER (or no such
 # qube); 3 = ran the step but couldn't deliver output back to the work qube
 # (contract breach); 4 = refused to write through a symlink at the dom0 output
@@ -27,6 +28,14 @@
 # runtime guard aborts with 9 (see SKILL.md "Target guard"), so a dispatch
 # refusal (5 — nothing ran) is distinguishable from a runtime mismatch (9 — the
 # step's own preamble fired).
+#
+# Previous output: qctl's first action on the work qube moves an existing
+# <step>.out to <step>.out.prev (one generation kept) and removes a stale
+# <step>.out.part, before the pull. After any dispatch that reached the work
+# qube, <step>.out therefore holds the new result or nothing — a re-dispatched
+# step, or one the target guard refused, never leaves an older run's footer
+# under the name the agent reads. (An agent that arms a watcher on the path
+# clears it itself first; see SKILL.md "Waiting for a step".)
 #
 # Completion footer: the last line of every shipped <step>.out is
 #   [qctl] END step=<step> target=<vm> rc=<n> version=<QCTL_VERSION> finished=<UTC>
@@ -157,6 +166,15 @@ DOM0_OUT="/tmp/qctl-${S}.out"
 # One line stating the effective configuration before anything runs, so a wrong
 # QCTL_* export is visible in the terminal rather than inferred from a failed pull.
 echo "[qctl] BEGIN v${QCTL_VERSION} target=${VM} step=${S} work=${WORK} user=${WORK_USER:-default} src=${SRC_DIR}"
+# Move this step's previous output aside before anything else happens on the
+# work qube (see header, "Previous output"). Done before the pull so that even a
+# dispatch that fails at the pull or at the target guard leaves no stale
+# <step>.out behind. `a || b && c` groups as `(a || b) && c`, so a failed mv
+# fails the whole command and is reported.
+if ! "${WORK_RUN[@]}" "[ ! -e '${WORK_OUT}' ] || mv -f '${WORK_OUT}' '${WORK_OUT}.prev' && rm -f '${WORK_OUT}.part'" </dev/null; then
+    echo "[qctl] ERROR: could not prepare ${WORK}:${SRC_DIR} (move a previous ${S}.out aside): is ${WORK} running, is qrexec allowed, and does ${WORK_USER:-the default user} own that directory?"
+    rm -f "$DOM0_TMP"; exit 1
+fi
 echo "[qctl] pulling ${WORK}:${SRC}"
 # --pass-io propagates the remote `cat` exit status, so a non-zero here means the
 # pull itself failed (work qube down, qrexec denied, or the file doesn't exist) —
