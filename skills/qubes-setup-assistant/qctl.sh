@@ -364,13 +364,16 @@ echo "[qctl] shipping output back to ${WORK}:${WORK_OUT}"
 # wakes on its creation reads the complete file. The size check, not cat's exit
 # status, decides publication: cat exits 0 on a stream cut short (EOF is EOF),
 # e.g. when qctl is interrupted mid-transfer. A failed or short delivery removes
-# the .part and leaves nothing under the watched name. The explicit chmod
-# (OUT_MODE, above) makes the file's mode independent of the remote umask.
+# the .part and leaves nothing under the watched name. `umask 077` runs on the
+# work qube first, so the .part is private from the moment it exists — dom0's
+# umask does not cross qrexec, and a chmod after the bytes cannot revoke a read
+# that already happened. The explicit chmod (OUT_MODE, above) then publishes
+# the documented mode, 0644 in the default layout.
 # Capture the ship status — delivery is qctl's contract, so a failure here must
 # not look like success.
 OUT_SIZE="$(wc -c < "$DOM0_OUT")"
 ship_rc=0
-"${WORK_RUN[@]}" "cat > '${WORK_OUT}.part' && [ \"\$(wc -c < '${WORK_OUT}.part')\" -eq ${OUT_SIZE} ] && chmod ${OUT_MODE} '${WORK_OUT}.part' && mv -f '${WORK_OUT}.part' '${WORK_OUT}' || { rm -f '${WORK_OUT}.part'; exit 1; }" < "$DOM0_OUT" || ship_rc=$?
+"${WORK_RUN[@]}" "umask 077; cat > '${WORK_OUT}.part' && [ \"\$(wc -c < '${WORK_OUT}.part')\" -eq ${OUT_SIZE} ] && chmod ${OUT_MODE} '${WORK_OUT}.part' && mv -f '${WORK_OUT}.part' '${WORK_OUT}' || { rm -f '${WORK_OUT}.part'; exit 1; }" < "$DOM0_OUT" || ship_rc=$?
 rm -f "$DOM0_TMP"
 if [ "$ship_rc" -ne 0 ]; then
     echo "[qctl] ERROR: failed to ship output back to ${WORK}:${WORK_OUT} (rc=$ship_rc); step rc was $rc. dom0 copy: ${DOM0_OUT}"
