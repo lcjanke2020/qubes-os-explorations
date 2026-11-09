@@ -13,6 +13,13 @@ set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO_QCTL="$HERE/../qctl.sh"
 T="$(mktemp -d "${TMPDIR:-/tmp}/qctl-shim-test.XXXXXX")" || exit 1
+# The scratch path becomes QCTL_SRC_DIR, which qctl holds to A-Za-z0-9._/-. A
+# TMPDIR with a '+', '=', '@' or space would make every case exit 2 and look
+# like a helper regression, so say what is wrong instead.
+case "$T" in *[!A-Za-z0-9._/-]*)
+    echo "scratch path '$T' has characters outside qctl's path charset (A-Za-z0-9._/-); point TMPDIR at a plain path" >&2
+    rm -rf "$T"; exit 1 ;;
+esac
 mkdir -p "$T/bin" "$T/faketmp" "$T/work/proj/qctl" "$T/work/tmp-qctl"
 sed -e "s#/tmp/qctl-#$T/faketmp/qctl-#g" "$REPO_QCTL" > "$T/qctl-under-test.sh"
 echo "scratch: $T"
