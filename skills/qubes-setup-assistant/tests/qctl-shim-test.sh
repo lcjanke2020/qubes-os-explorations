@@ -30,15 +30,24 @@ echo "lines differing from the repo copy: $(diff "$REPO_QCTL" "$T/qctl-under-tes
 # the shim's stdin. Two knobs simulate delivery faults on the ship-back only
 # (the command that writes the .part file): SHIM_SLOW_SHIP=1 delivers the stream
 # in two chunks 0.6 s apart; SHIM_TRUNCATE_SHIP=1 delivers only the first 5 bytes.
+# SHIM_PLANT_PART=1 plants a world-writable .part right after the prepare step,
+# as another account in a shared staging directory could.
 cat > "$T/bin/qvm-run" <<EOF
 #!/bin/bash
 printf '%s\n' "qvm-run \$*" >> "$T/argv.log"
 cmd="\${@: -1}"
 cmd="\${cmd//\/tmp\/.qctl-step/$T/faketmp/.qctl-step}"
 case "\$cmd" in
-  *".part'"*)
+  *"cat > '"*".part'"*)      # the ship-back
     if [ "\${SHIM_SLOW_SHIP:-0}" = 1 ]; then { head -c 4; sleep 0.6; cat; } | bash -c "\$cmd"; exit \$?; fi
     if [ "\${SHIM_TRUNCATE_SHIP:-0}" = 1 ]; then head -c 5 | bash -c "\$cmd"; exit \$?; fi ;;
+  *".prev'"*)                 # the prepare step; SHIM_PLANT_PART=1 plants a 0666 .part right after it
+    if [ "\${SHIM_PLANT_PART:-0}" = 1 ]; then
+      bash -c "\$cmd"; rc=\$?
+      part="\$(printf '%s' "\$cmd" | sed -n "s/.*rm -f '\([^']*\)'.*/\1/p")"
+      : > "\$part"; chmod 0666 "\$part"
+      exit \$rc
+    fi ;;
 esac
 exec bash -c "\$cmd"
 EOF
@@ -68,7 +77,7 @@ runq() { # runq <label> <expected-rc> [VAR=value ...] -- <qctl args...>
   # Start from a clean helper configuration: the SKILL tells people to export
   # QCTL_* in their shells, and an inherited value would turn a default-layout
   # case into an agent-home one. The shim fault knobs are cleared the same way.
-  env -u QCTL_WORK -u QCTL_SRC_DIR -u QCTL_WORK_USER -u SHIM_SLOW_SHIP -u SHIM_TRUNCATE_SHIP \
+  env -u QCTL_WORK -u QCTL_SRC_DIR -u QCTL_WORK_USER -u SHIM_SLOW_SHIP -u SHIM_TRUNCATE_SHIP -u SHIM_PLANT_PART \
       "${envs[@]}" bash "$T/qctl-under-test.sh" "$@" > "$T/$label.stdout" 2>&1; rc=$?
   if [ "$rc" -eq "$want" ]; then echo "PASS $label (rc=$rc)"; pass=$((pass+1))
   else echo "FAIL $label rc=$rc want=$want"; fail=$((fail+1)); sed 's/^/    /' "$T/$label.stdout"; fi
@@ -109,7 +118,7 @@ runq dom0-step 0 QCTL_WORK=wq QCTL_SRC_DIR="$WQ" -- dom0 s-dom0
 check "BEGIN banner" grep -q "^\[qctl\] BEGIN v1.1.0 target=dom0 step=s-dom0 work=wq user=default src=$WQ$" "$T/dom0-step.stdout"
 check "archive call: --no-gui, no --user, moves old .out aside" grep -q "^qvm-run --no-gui --pass-io wq \[ ! -e '$WQ/s-dom0.out' \] || mv -f '$WQ/s-dom0.out' '$WQ/s-dom0.out.prev'" "$T/argv.log"
 check "pull: --no-gui, no --user" grep -q "^qvm-run --no-gui --pass-io wq cat '$WQ/s-dom0.sh'$" "$T/argv.log"
-check "ship writes .part, checks size, renames" grep -q "^qvm-run --no-gui --pass-io wq umask 077; cat > '$WQ/s-dom0.out.part' && \[ \"\$(wc -c < '$WQ/s-dom0.out.part')\" -eq [0-9]* \] && chmod 0644 '$WQ/s-dom0.out.part' && mv -f '$WQ/s-dom0.out.part' '$WQ/s-dom0.out' || { rm -f '$WQ/s-dom0.out.part'; exit 1; }$" "$T/argv.log"
+check "ship writes .part, checks size, renames" grep -q "^qvm-run --no-gui --pass-io wq umask 077; set -C; cat > '$WQ/s-dom0.out.part' && \[ \"\$(wc -c < '$WQ/s-dom0.out.part')\" -eq [0-9]* \] && chmod 0644 '$WQ/s-dom0.out.part' && mv -f '$WQ/s-dom0.out.part' '$WQ/s-dom0.out' || { rm -f '$WQ/s-dom0.out.part'; exit 1; }$" "$T/argv.log"
 check ".out exists" test -s "$WQ/s-dom0.out"
 check ".out line 1 = hello" first_line_is "$WQ/s-dom0.out" hello
 check "footer on its own line" has_footer "$WQ/s-dom0.out" s-dom0 dom0 0
@@ -129,7 +138,7 @@ check "BEGIN shows user" grep -q "^\[qctl\] BEGIN v1.1.0 target=myvm step=s-vm w
 check "archive call uses --user agent" grep -q "^qvm-run --no-gui --pass-io --user agent wq \[ ! -e '$AH/s-vm.out' \]" "$T/argv.log"
 check "pull uses --user agent" grep -q "^qvm-run --no-gui --pass-io --user agent wq cat '$AH/s-vm.sh'$" "$T/argv.log"
 check "in-VM run is --no-gui --pass-io --user root" grep -q "^qvm-run --no-gui --pass-io --user root myvm T=" "$T/argv.log"
-check "ship uses --user agent and mode 0600" grep -q "^qvm-run --no-gui --pass-io --user agent wq umask 077; cat > '$AH/s-vm.out.part' && .* chmod 0600 '$AH/s-vm.out.part' && mv -f" "$T/argv.log"
+check "ship uses --user agent and mode 0600" grep -q "^qvm-run --no-gui --pass-io --user agent wq umask 077; set -C; cat > '$AH/s-vm.out.part' && .* chmod 0600 '$AH/s-vm.out.part' && mv -f" "$T/argv.log"
 check "qvm-start called" grep -q '^qvm-start --skip-if-running myvm$' "$T/argv.log"
 check "footer rc=7" has_footer "$AH/s-vm.out" s-vm myvm 7
 check "step output present" grep -qx first-run "$AH/s-vm.out"
@@ -174,6 +183,26 @@ check "no .out published" absent "$WQ/s-slow.out"
 check "no .part left behind" absent "$WQ/s-slow.out.part"
 check "previous output archived as .prev" has_footer "$WQ/s-slow.out.prev" s-slow dom0 0
 check "dom0 copy still complete" has_footer "$T/faketmp/qctl-s-slow.out" s-slow dom0 0
+
+echo "== I: a .part planted after the prepare step is refused, not reused =="
+runq planted-part 3 QCTL_WORK=wq QCTL_SRC_DIR="$WQ" SHIM_PLANT_PART=1 -- dom0 s-slow
+check "ship argv uses set -C" grep -q "umask 077; set -C; cat > '$WQ/s-slow.out.part'" "$T/argv.log"
+check "exit 3 message" grep -q 'failed to ship output back' "$T/planted-part.stdout"
+check "no .out published" absent "$WQ/s-slow.out"
+check "planted file was never written to" bash -c "[ ! -e '$WQ/s-slow.out.part' ] || [ ! -s '$WQ/s-slow.out.part' ]"
+check "dom0 copy complete" has_footer "$T/faketmp/qctl-s-slow.out" s-slow dom0 0
+
+echo "== J: a failed footer write is not shipped as success =="
+# An exported echo that fails only for the END line stands in for a full dom0
+# filesystem; the helper's other echo calls pass through to the builtin.
+echo() { case "${1:-}" in "[qctl] END"*) return 1 ;; esac; builtin echo "$@"; }
+export -f echo
+runq footer-fail 3 QCTL_WORK=wq QCTL_SRC_DIR="$WQ" -- dom0 s-slow
+unset -f echo
+check "exit 3 message names the footer" grep -q 'could not append the completion footer' "$T/footer-fail.stdout"
+check "no ship attempted" bash -c "! grep -q 'set -C; cat' '$T/argv.log'"
+check "no .out published" absent "$WQ/s-slow.out"
+check "dom0 copy kept" test -s "$T/faketmp/qctl-s-slow.out"
 
 echo
 echo "RESULT: pass=$pass fail=$fail"
