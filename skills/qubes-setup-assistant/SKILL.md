@@ -484,7 +484,7 @@ These are the convenience-driven calls that quietly undo architecture decisions.
 - **"Just open port 22 on the AppVM for now, we'll harden later."** Harden-later doesn't tend to happen. Suggest the xterm-via-qvm-run path instead.
 - **"Can you just automate the whole provisioning?"** Suggest chunked scripts the user can review between phases. Echo what's about to happen at each phase. Print verification output. Build-in idempotency at chunk boundaries, not "atomic-or-bust" macros.
 - **"Use the shared template, save disk."** If the service you're installing isn't already intended for that template, clone first. Disk is cheap; surface from leaking service binaries into unrelated AppVMs isn't.
-- **"Add a `host` line to pg_hba.conf temporarily for debugging."** TCP listeners on AppVMs that were scoped to Unix-socket-only are how the security posture slips away one debug session at a time. Suggest `qvm-run -u root <vm> 'sudo -u postgres psql ...'` instead.
+- **"Add a `host` line to pg_hba.conf temporarily for debugging."** TCP listeners on AppVMs that were scoped to Unix-socket-only are how the security posture slips away one debug session at a time. Suggest `qvm-run --no-gui -u root <vm> 'sudo -u postgres psql ...'` instead.
 
 ## Final note on automation
 
