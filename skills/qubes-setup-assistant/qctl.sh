@@ -16,7 +16,7 @@
 # and exits 3 with nothing published).
 # A dom0 copy is left at /tmp/qctl-<step>.out (mode 0600 — dom0 artifacts hold the
 # combined output of root-executed steps and stay private; the work-qube copy is
-# chmodded 0644 for the agent). qctl exits with the STEP's own exit status, so a
+# chmodded 0644 for the agent in the default layout, 0600 under QCTL_WORK_USER). qctl exits with the STEP's own exit status, so a
 # failed step is detectable when chaining many of them. Other exit codes are
 # distinct so $? is unambiguous: 1 = couldn't reach the work qube to prepare
 # the staging directory or pull the step script;
@@ -131,7 +131,7 @@ esac
 set -uo pipefail
 umask 077   # dom0-created files (the tmpfile + /tmp/qctl-<step>.out) hold root
             # step output; keep them private. The shipped-back work-qube copy is
-            # chmodded 0644 explicitly below, so this doesn't affect the agent.
+            # chmodded explicitly below (OUT_MODE), so this doesn't affect the agent.
 
 WORK="${QCTL_WORK:-work-qube}"
 SRC_DIR="${QCTL_SRC_DIR:-/tmp/qctl}"
@@ -163,6 +163,12 @@ case "$WORK_USER" in *[!A-Za-z0-9._-]*) echo "[qctl] ERROR: bad QCTL_WORK_USER '
 WORK_RUN=(qvm-run --no-gui --pass-io)
 [ -n "$WORK_USER" ] && WORK_RUN+=(--user "$WORK_USER")
 WORK_RUN+=("$WORK")
+# Mode of the shipped <step>.out: 0644 in the default layout, where the work
+# qube's default user writes a file that the agent (possibly another account)
+# must read; 0600 when QCTL_WORK_USER is set, since the agent then writes its
+# own file and nothing else needs to read it.
+OUT_MODE=0644
+[ -n "$WORK_USER" ] && OUT_MODE=0600
 
 SRC="${SRC_DIR}/${S}.sh"
 WORK_OUT="${SRC_DIR}/${S}.out"
@@ -354,13 +360,13 @@ echo "[qctl] shipping output back to ${WORK}:${WORK_OUT}"
 # wakes on its creation reads the complete file. The size check, not cat's exit
 # status, decides publication: cat exits 0 on a stream cut short (EOF is EOF),
 # e.g. when qctl is interrupted mid-transfer. A failed or short delivery removes
-# the .part and leaves nothing under the watched name. chmod 0644 lets the agent
-# read the file regardless of the work qube default user's umask (the cross-user
-# hand-off caveat in the header). Capture the ship status — delivery is qctl's
-# contract, so a failure here must not look like success.
+# the .part and leaves nothing under the watched name. The explicit chmod
+# (OUT_MODE, above) makes the file's mode independent of the remote umask.
+# Capture the ship status — delivery is qctl's contract, so a failure here must
+# not look like success.
 OUT_SIZE="$(wc -c < "$DOM0_OUT")"
 ship_rc=0
-"${WORK_RUN[@]}" "cat > '${WORK_OUT}.part' && [ \"\$(wc -c < '${WORK_OUT}.part')\" -eq ${OUT_SIZE} ] && chmod 0644 '${WORK_OUT}.part' && mv -f '${WORK_OUT}.part' '${WORK_OUT}' || { rm -f '${WORK_OUT}.part'; exit 1; }" < "$DOM0_OUT" || ship_rc=$?
+"${WORK_RUN[@]}" "cat > '${WORK_OUT}.part' && [ \"\$(wc -c < '${WORK_OUT}.part')\" -eq ${OUT_SIZE} ] && chmod ${OUT_MODE} '${WORK_OUT}.part' && mv -f '${WORK_OUT}.part' '${WORK_OUT}' || { rm -f '${WORK_OUT}.part'; exit 1; }" < "$DOM0_OUT" || ship_rc=$?
 rm -f "$DOM0_TMP"
 if [ "$ship_rc" -ne 0 ]; then
     echo "[qctl] ERROR: failed to ship output back to ${WORK}:${WORK_OUT} (rc=$ship_rc); step rc was $rc. dom0 copy: ${DOM0_OUT}"

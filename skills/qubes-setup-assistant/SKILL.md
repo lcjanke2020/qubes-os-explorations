@@ -96,7 +96,7 @@ Model:
   qvm-run --no-gui --pass-io --user <agent-user> <work-qube> "cat $QCTL_SRC_DIR/qctl.sh" </dev/null > ~/qctl && chmod +x ~/qctl
   bash ~/qctl --version
   ```
-  Outputs then survive work-qube restarts, nothing is world-readable, and the hand-off needs no `/tmp` at all. `qvm-run --user` runs the command as that account through qrexec; the account must exist on the work qube, and no password is involved. Field-tested driving a GPU-qube bring-up of some forty steps from a secondary account.
+  Outputs then survive work-qube restarts and the hand-off needs no `/tmp` at all. Nothing is world-readable: with `QCTL_WORK_USER` set, `qctl` ships `<step>.out` as the agent with mode `0600` (the default layout keeps `0644`, which its cross-user hand-off needs), and the agent's `0700` home closes the directory to other accounts in any case. `qvm-run --user` runs the command as that account through qrexec; the account must exist on the work qube, and no password is involved. Field-tested driving a GPU-qube bring-up of some forty steps from a secondary account.
 
 **Waiting for a step — wake on the file, don't poll.** `qctl` ships the output only after the step has exited, and publishes it by renaming a byte-count-verified `<step>.out.part` into place, so on the work qube `<step>.out` is either absent or complete; there is never a partial file to tail there. The last line of a complete file is the footer:
 
