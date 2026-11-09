@@ -46,8 +46,9 @@
 # the footer carries rc into the file. It is also a uniform "the step is over"
 # marker: the file is shipped whole after the step exits, so on the work qube
 # <step>.out is either absent or complete — watch for the file, then read the
-# footer. No footer in the dom0 copy means the step is still running or was
-# interrupted.
+# footer. No footer in the dom0 copy means the step is still running, was
+# interrupted, or the footer write itself failed (qctl then exits 3 and ships
+# nothing).
 #
 # Why this exists: dom0 has no clipboard in or out, and an agent in an app qube
 # can't reach dom0 at all. This turns every step into one short, reviewable
