@@ -150,9 +150,13 @@ check "pull error names the user" grep -q 'can agent read it' "$T/pull-missing.s
 echo "== G: atomic publication under slow delivery (the documented watcher) =="
 printf 'QCTL_TARGET=dom0\necho RESULT: OK\n' > "$WQ/s-slow.sh"
 rm -f "$WQ/s-slow.out"                                     # the recipe: clear the watched path first
-( until [ -f "$WQ/s-slow.out" ]; do sleep 0.05; done; tail -n 1 "$WQ/s-slow.out" > "$T/watch.txt" ) &
+# The watcher is bounded: if publication regresses, it must fail the suite, not
+# hang it in `wait`.
+timeout 30 bash -c 'until [ -f "$1" ]; do sleep 0.05; done; tail -n 1 "$1"' _ "$WQ/s-slow.out" > "$T/watch.txt" &
+wpid=$!
 runq slow-ship 0 QCTL_WORK=wq QCTL_SRC_DIR="$WQ" SHIM_SLOW_SHIP=1 -- dom0 s-slow
-wait
+wait "$wpid"; wrc=$?
+check "watcher returned before its 30 s deadline" [ "$wrc" -eq 0 ]
 check "watcher saw a complete file (footer is its last line)" grep -Eq "$(printf "$footer_re" s-slow dom0 0)" "$T/watch.txt"
 check "no .part left behind" absent "$WQ/s-slow.out.part"
 
