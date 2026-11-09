@@ -63,13 +63,13 @@
 # Install once in dom0 (pull from the work qube; no clipboard needed). The agent
 # stages qctl.sh into the staging dir first, alongside its step scripts.
 # Single-account work qube (agent = the qube's default user), default layout:
-#   qvm-run --pass-io <work-qube> 'cat /tmp/qctl/qctl.sh' </dev/null > ~/qctl && chmod +x ~/qctl
+#   qvm-run --no-gui --pass-io <work-qube> 'cat /tmp/qctl/qctl.sh' </dev/null > ~/qctl && chmod +x ~/qctl
 #   export QCTL_WORK=<work-qube>
 # Multi-account work qube (agent has its own 0700 home and is not the default
 # user) — stage in the agent's home and act as the agent; the install pull needs
 # the --user too because the helper itself sits in that home:
 #   export QCTL_WORK=<work-qube> QCTL_WORK_USER=<agent-user> QCTL_SRC_DIR=/home/<agent-user>/<project>/qctl
-#   qvm-run --pass-io --user <agent-user> <work-qube> "cat $QCTL_SRC_DIR/qctl.sh" </dev/null > ~/qctl && chmod +x ~/qctl
+#   qvm-run --no-gui --pass-io --user <agent-user> <work-qube> "cat $QCTL_SRC_DIR/qctl.sh" </dev/null > ~/qctl && chmod +x ~/qctl
 # Then `bash ~/qctl --version` and compare with QCTL_VERSION in the skill's copy.
 #
 # Cross-user /tmp hand-off (the default layout): the agent runs `mkdir -p
@@ -155,8 +155,12 @@ case "$SRC_DIR"   in *[!A-Za-z0-9._/-]*|''|*..*|[!/]*) echo "[qctl] ERROR: bad Q
 case "$WORK_USER" in *[!A-Za-z0-9._-]*) echo "[qctl] ERROR: bad QCTL_WORK_USER '$WORK_USER' (allowed: A-Za-z0-9._-)"; exit 2 ;; esac
 
 # Every qvm-run against the WORK qube (pull and ship-back) goes through this
-# array, so --user lands on both or neither.
-WORK_RUN=(qvm-run --pass-io)
+# array, so --user lands on both or neither. --no-gui: these calls need no GUI
+# session, and qvm-run's default wait (qubes.WaitForSession) is keyed on the
+# qube's *default* user regardless of --user (qubesadmin/tools/qvm_run.py sends
+# vm.default_user), so without the flag a headless work qube, or one whose GUI
+# agent is mid-restart, would hang the pull.
+WORK_RUN=(qvm-run --no-gui --pass-io)
 [ -n "$WORK_USER" ] && WORK_RUN+=(--user "$WORK_USER")
 WORK_RUN+=("$WORK")
 

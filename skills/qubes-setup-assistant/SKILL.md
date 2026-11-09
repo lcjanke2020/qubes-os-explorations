@@ -36,7 +36,7 @@ The toolkit is right for this; the defaults need conscious re-tuning. This skill
 ## Operating principles
 
 1. **The user reviews every script.** That is the Qubes posture — don't try to short-circuit it. Generate small, reviewable chunks. Echo what's about to happen before doing it. Print verification output the user can sanity-check. If your instinct is to bundle five phases into one push-button script, split them.
-2. **dom0 is the control plane.** Long sessions of admin work should flow from a single dom0 terminal using `qvm-run --pass-io`. Don't direct the user into VM terminals (small fonts, sudo prompts on templates, paste limits) when dom0 + qvm-run does the same job.
+2. **dom0 is the control plane.** Long sessions of admin work should flow from a single dom0 terminal using `qvm-run --no-gui --pass-io`. Don't direct the user into VM terminals (small fonts, sudo prompts on templates, paste limits) when dom0 + qvm-run does the same job.
 3. **Trust boundaries are real.** TemplateVMs, AppVMs, dom0, sys-firewall, sys-net, DispVMs each have distinct properties. When suggesting a command, name the VM it runs in and *why* that VM.
 4. **Push back on convenience-driven decisions that pre-empt architecture decisions.** See "When to push back" section below.
 
@@ -46,15 +46,15 @@ Run scripts in target VMs from a single dom0 terminal. Two flavors:
 
 **Stream a script from one qube into another (no `qvm-copy` needed):**
 ```bash
-qvm-run --pass-io <source-vm> 'cat /path/to/script.sh' \
-  | qvm-run --pass-io --user root <target-vm> 'bash'
+qvm-run --no-gui --pass-io <source-vm> 'cat /path/to/script.sh' \
+  | qvm-run --no-gui --pass-io --user root <target-vm> 'bash'
 ```
 Output streams back to dom0. No `~/QubesIncoming/` path-tracking, no SRC variable juggling.
 
 **Capture output to a tmpfile then ship to an extraction VM (for secrets / long logs):**
 ```bash
-... | qvm-run --pass-io --user root <target-vm> 'bash' | tee /tmp/out.txt
-qvm-run --pass-io <dest-vm> 'cat > /home/user/QubesIncoming/dom0/out.txt' < /tmp/out.txt
+... | qvm-run --no-gui --pass-io --user root <target-vm> 'bash' | tee /tmp/out.txt
+qvm-run --no-gui --pass-io <dest-vm> 'cat > /home/user/QubesIncoming/dom0/out.txt' < /tmp/out.txt
 # Extract in <dest-vm>, then:
 shred -u /tmp/out.txt   # dom0 copy
 # and in <dest-vm>:
@@ -69,7 +69,7 @@ Model:
 - The agent stages files into a **staging directory on its work qube**: `qctl.sh` itself **once** (so the install one-liner below can pull it), then each `<step>.sh`. `qctl` pulls `<step>.sh` from that directory and ships `<step>.out` back into it. The directory is `/tmp/qctl` by default; which layout to use depends on the account the agent runs as — see "Staging directory" below.
 - The human installs `qctl` in dom0 once (pull it, no clipboard needed), sets the work qube, and checks the version:
   ```bash
-  qvm-run --pass-io <work-qube> 'cat /tmp/qctl/qctl.sh' </dev/null > ~/qctl && chmod +x ~/qctl
+  qvm-run --no-gui --pass-io <work-qube> 'cat /tmp/qctl/qctl.sh' </dev/null > ~/qctl && chmod +x ~/qctl
   export QCTL_WORK=<work-qube>
   bash ~/qctl --version        # "qctl 1.1.0" — must match the copy in this skill
   ```
@@ -93,7 +93,7 @@ Model:
   # dom0, once per session (or in ~/.bashrc)
   export QCTL_WORK=<work-qube> QCTL_WORK_USER=<agent-user> QCTL_SRC_DIR=/home/<agent-user>/<project>/qctl
   # dom0, install
-  qvm-run --pass-io --user <agent-user> <work-qube> "cat $QCTL_SRC_DIR/qctl.sh" </dev/null > ~/qctl && chmod +x ~/qctl
+  qvm-run --no-gui --pass-io --user <agent-user> <work-qube> "cat $QCTL_SRC_DIR/qctl.sh" </dev/null > ~/qctl && chmod +x ~/qctl
   bash ~/qctl --version
   ```
   Outputs then survive work-qube restarts, nothing is world-readable, and the hand-off needs no `/tmp` at all. `qvm-run --user` runs the command as that account through qrexec; the account must exist on the work qube, and no password is involved. Field-tested driving a GPU-qube bring-up of some forty steps from a secondary account.
@@ -111,9 +111,9 @@ mv -f <staging-dir>/<step>.out <staging-dir>/<step>.out.prev 2>/dev/null   # cle
 until [ -f <staging-dir>/<step>.out ]; do sleep 2; done; tail -n 5 <staging-dir>/<step>.out
 ```
 
-Then ask the human to dispatch. `qctl` makes the same move itself as its first action on the work qube (one generation kept as `<step>.out.prev`, a stale `.part` removed), so after any dispatch that reached the work qube `<step>.out` holds the new result or nothing — but the watcher is armed before the human types the command, so the agent-side clear is what protects the watcher. It fires once, when the file lands, with the verdict lines. Read the footer first: `rc=0` says the step ran to the end and exited 0; then read the step's own `== AFTER ==` / `RESULT:` lines above it before calling the step good. **No file after the time the step should have taken** means one of four things: the step is still running; `qctl` refused before running anything (exit 1, 2, 4 or 5 — work qube unreachable or pull failed, bad name or environment, symlink at the dom0 output path, target guard — and the reason is on the dom0 terminal only); it was interrupted (Ctrl-C in dom0 kills `qctl` and the step together, and nothing ships); or `qctl` could not deliver (exit 3 in dom0; the `.part` is removed and the complete output stays at `/tmp/qctl-<step>.out`). While a step runs, that dom0 copy is the only readable output — a human can `tail -f /tmp/qctl-<step>.out` in a second dom0 terminal before deciding to interrupt. A step that prints nothing for minutes is most often `qvm-run` waiting for the qube's GUI session (Trap 9), not a dead qrexec; `qctl` passes `--no-gui` on its in-qube path since 1.1.0, and any nested `qvm-run` inside a step should too.
+Then ask the human to dispatch. `qctl` makes the same move itself as its first action on the work qube (one generation kept as `<step>.out.prev`, a stale `.part` removed), so after any dispatch that reached the work qube `<step>.out` holds the new result or nothing — but the watcher is armed before the human types the command, so the agent-side clear is what protects the watcher. It fires once, when the file lands, with the verdict lines. Read the footer first: `rc=0` says the step ran to the end and exited 0; then read the step's own `== AFTER ==` / `RESULT:` lines above it before calling the step good. **No file after the time the step should have taken** means one of four things: the step is still running; `qctl` refused before running anything (exit 1, 2, 4 or 5 — work qube unreachable or pull failed, bad name or environment, symlink at the dom0 output path, target guard — and the reason is on the dom0 terminal only); it was interrupted (Ctrl-C in dom0 kills `qctl` and the step together, and nothing ships); or `qctl` could not deliver (exit 3 in dom0; the `.part` is removed and the complete output stays at `/tmp/qctl-<step>.out`). While a step runs, that dom0 copy is the only readable output — a human can `tail -f /tmp/qctl-<step>.out` in a second dom0 terminal before deciding to interrupt. A step that prints nothing for minutes is most often `qvm-run` waiting for the qube's GUI session (Trap 9), not a dead qrexec; `qctl` passes `--no-gui` on every `qvm-run` it makes since 1.1.0 — the wait is keyed on the qube's default user, so `--user` alone does not avoid it — and any nested `qvm-run` inside a step should too.
 
-Why run from a tmpfile, not `… | bash`: a step that contains a heredoc or a nested `qvm-run --pass-io` would otherwise drain the script stream off stdin. `qctl` does this on **both** execution paths — the dom0 path runs `bash <tmpfile>`, and the in-VM path stages the script into a tmpfile inside the target VM (`cat > "$T"; bash "$T"`) rather than `qvm-run … 'bash' < script` — each with the step's own stdin redirected from `/dev/null`. When a step *needs* to feed a script into a nested VM, redirect that nested `qvm-run` from a file/pipe — never from the inherited stdin.
+Why run from a tmpfile, not `… | bash`: a step that contains a heredoc or a nested `qvm-run --no-gui --pass-io` would otherwise drain the script stream off stdin. `qctl` does this on **both** execution paths — the dom0 path runs `bash <tmpfile>`, and the in-VM path stages the script into a tmpfile inside the target VM (`cat > "$T"; bash "$T"`) rather than `qvm-run … 'bash' < script` — each with the step's own stdin redirected from `/dev/null`. When a step *needs* to feed a script into a nested VM, redirect that nested `qvm-run` from a file/pipe — never from the inherited stdin.
 
 Keep the **review discipline** (Operating principle 1): the agent shows each `<step>.sh` (by path on the work qube, or pasted in chat) before the human runs it; scripts stay small and single-purpose; secret-bearing steps print nothing sensitive and shred their copies (Pattern C). This pattern was field-tested driving a database-qube migration end-to-end from an app-qube agent.
 
@@ -187,7 +187,7 @@ Codified from steps that drove real migrations. Every generated step should:
 
 Full templates ship `qubes-core-agent-passwordless-root`, and an AppVM's `/etc` comes from its template — so a default AppVM has passwordless sudo *because its template does*. **Minimal** templates (`debian-13-minimal`, `fedora-<release>-minimal`) omit the package, so the minimal template itself and any qube based on it will prompt for a password that was never set. Don't direct the user to open a terminal there and run `sudo`. Run as root from dom0 instead:
 ```bash
-qvm-run --pass-io --user root <template-vm> 'bash /path/to/script'
+qvm-run --no-gui --pass-io --user root <template-vm> 'bash /path/to/script'
 ```
 When you're already root via `--user root`, any `sudo <cmd>` prefix in the script is redundant — the command still executes, but there's no password prompt and no privilege change. `sudo -u <other-user>` semantics are unaffected (still meaningful for user-switching).
 
@@ -195,10 +195,10 @@ When you're already root via `--user root`, any `sudo <cmd>` prefix in the scrip
 
 By design. Both **VM → dom0** and **dom0 → VM** clipboard transfer are blocked.
 
-- **VM → dom0** (paste a script into dom0): pull via `qvm-run --pass-io <vm> 'cat /path' > /tmp/script.sh` instead.
+- **VM → dom0** (paste a script into dom0): pull via `qvm-run --no-gui --pass-io <vm> 'cat /path' > /tmp/script.sh` instead.
 - **dom0 → VM** (extract a password from a script's stdout to a password manager in another qube): redirect into the target VM via stdin:
   ```bash
-  qvm-run --pass-io <dest-vm> 'cat > /home/user/QubesIncoming/dom0/x.txt' < /tmp/x.txt
+  qvm-run --no-gui --pass-io <dest-vm> 'cat > /home/user/QubesIncoming/dom0/x.txt' < /tmp/x.txt
   ```
 
 Never say "copy the output and paste it into your password manager" without acknowledging this trap and giving the workaround.
@@ -272,7 +272,8 @@ Two adjacent facts for the resize itself:
 
 By default `qvm-run` runs `qubes.WaitForSession` in the target before your command, so the command starts only once the qube's X session is up. Invisible on a healthy qube and right for GUI apps — and a trap for admin work: on a qube whose in-qube Xorg is not coming up, every `qvm-run` to it blocks with no output and no error, indistinguishable from a dead qrexec. The field case was a GPU qube after the card was attached: the GUI agent's Xorg restarted about every 11 s (the kernel log showed it reopening the NVIDIA device nodes each time), so the session never arrived; a 60 s probe returned nothing, the dom0-side partial output stayed empty, and the qube was wrongly declared unresponsive. Shutdown, qrexec and the kernel were fine the whole time, and the same probe with `--no-gui` answered immediately. Half an hour went into that misdiagnosis.
 
-- Admin and probe commands need no session: pass `--no-gui`, as in `qvm-run --no-gui --pass-io --user root <vm> '…'`. `qctl` does this on its in-qube path since 1.1.0; nested `qvm-run` calls inside a step should too (Step-script convention 10).
+- Admin and probe commands need no session: pass `--no-gui`, as in `qvm-run --no-gui --pass-io --user root <vm> '…'`. `qctl` does this on every `qvm-run` it makes since 1.1.0, the pull and ship-back included: the wait is keyed on the qube's *default* user (`qvm-run` sends `vm.default_user` to `qubes.WaitForSession`), so `--user <agent>` does not move it. Nested `qvm-run` calls inside a step should carry the flag too (Step-script convention 10), and so do the examples in this skill.
+- The wait happens only when `DISPLAY` is set in the dom0 shell and the qube has a GUI VM with the `gui` feature on (`has_gui()` in `qvm_run.py`). The same command therefore hangs from a dom0 terminal window and returns from a dom0 virtual console — one more way the symptom misleads.
 - Diagnose before you declare a qube dead: `qvm-run --no-gui --pass-io <vm> 'uptime'` from dom0. If that answers, the qube is fine and its GUI session is the problem — read the qube's kernel log and journal for a restarting Xorg.
 - `--no-gui` only skips the session wait; the GUI daemon and the qube's display are untouched. Keep the flag for non-GUI commands — a GUI application still needs the session.
 
@@ -294,7 +295,7 @@ For services like Postgres where package install creates an empty state dir: dro
 
 When a script must generate a secret (random password, key) inside a target qube and surface it for the user to store:
 1. Generate inside the target. Don't pass secrets across qrexec on the command line.
-2. Stream output to dom0 via `qvm-run --pass-io | tee /tmp/x.txt`.
+2. Stream output to dom0 via `qvm-run --no-gui --pass-io | tee /tmp/x.txt`.
 3. Ship `/tmp/x.txt` to a trusted extraction VM via redirect-into-qvm-run (see Trap 3 workaround).
 4. Extract there into the password manager.
 5. `shred -u` both copies.
@@ -329,16 +330,16 @@ Before re-running, check whether the failed step left partial state. Useful one-
 
 ```bash
 # config file landed?
-qvm-run --pass-io <vm> 'cat /rw/config/qubes-bind-dirs.d/50_x.conf 2>&1'
+qvm-run --no-gui --pass-io <vm> 'cat /rw/config/qubes-bind-dirs.d/50_x.conf 2>&1'
 
 # backing dir present?
-qvm-run --pass-io <vm> 'ls -la /rw/bind-dirs/'
+qvm-run --no-gui --pass-io <vm> 'ls -la /rw/bind-dirs/'
 
 # binds active after boot?
-qvm-run --pass-io <vm> 'findmnt /var/lib/<service>; findmnt /etc/<service>'
+qvm-run --no-gui --pass-io <vm> 'findmnt /var/lib/<service>; findmnt /etc/<service>'
 
 # fresh boot vs stale?
-qvm-run --pass-io <vm> 'uptime'
+qvm-run --no-gui --pass-io <vm> 'uptime'
 ```
 
 Pasting state output beats guessing about idempotency.
