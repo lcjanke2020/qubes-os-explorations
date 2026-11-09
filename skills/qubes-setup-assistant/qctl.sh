@@ -10,20 +10,21 @@
 # root inside <target-vm> (auto-starting it), or directly in dom0 when the
 # target is the literal word "dom0" — appends a one-line completion footer, and
 # ships the combined output back to <staging-dir>/<step>.out on the WORK qube so
-# the agent can read the result. Delivery goes to <step>.out.part first; the byte
-# count is checked against the dom0 copy and the file is then renamed into place,
-# so <step>.out is never partial (a failed or short delivery removes the .part
-# and exits 3 with nothing published).
-# A dom0 copy is left at /tmp/qctl-<step>.out (mode 0600 — dom0 artifacts hold the
-# combined output of root-executed steps and stay private; the work-qube copy is
-# chmodded 0644 for the agent in the default layout, 0600 under QCTL_WORK_USER). qctl exits with the STEP's own exit status, so a
-# failed step is detectable when chaining many of them. Other exit codes are
-# distinct so $? is unambiguous: 1 = couldn't reach the work qube to prepare
-# the staging directory or pull the step script;
-# 2 = wrong number of arguments, bad VM/step/work-qube name, bad
-# QCTL_SRC_DIR/QCTL_WORK_USER (or no such qube); 3 = ran the step but couldn't deliver output back to the work qube
-# (contract breach); 4 = refused to write through a symlink at the dom0 output
-# path; 5 = target-guard refusal at dispatch (QCTL_TARGET declaration missing,
+# the agent can read the result. Delivery goes to <step>.out.part first; the
+# byte count is checked against the dom0 copy and the file is then renamed into
+# place, so <step>.out is never partial (a failed or short delivery removes the
+# .part and exits 3 with nothing published).
+# A dom0 copy is left at /tmp/qctl-<step>.out (mode 0600 — dom0 artifacts hold
+# the combined output of root-executed steps and stay private; the work-qube
+# copy is chmodded 0644 for the agent in the default layout, 0600 under
+# QCTL_WORK_USER). qctl exits with the STEP's own exit status, so a failed step
+# is detectable when chaining many of them. Other exit codes are distinct so $?
+# is unambiguous: 1 = couldn't reach the work qube to prepare the staging
+# directory or pull the step script; 2 = wrong number of arguments, bad
+# VM/step/work-qube name, bad QCTL_SRC_DIR/QCTL_WORK_USER (or no such qube);
+# 3 = ran the step but couldn't deliver output back to the work qube (contract
+# breach); 4 = refused to write through a symlink at the dom0 output path;
+# 5 = target-guard refusal at dispatch (QCTL_TARGET declaration missing,
 # malformed, or not matching the dispatch target). By convention the in-script
 # runtime guard aborts with 9 (see SKILL.md "Target guard"), so a dispatch
 # refusal (5 — nothing ran) is distinguishable from a runtime mismatch (9 — the
