@@ -22,8 +22,9 @@
 # is unambiguous: 1 = couldn't reach the work qube to prepare the staging
 # directory or pull the step script; 2 = wrong number of arguments, bad
 # VM/step/work-qube name, bad QCTL_SRC_DIR/QCTL_WORK_USER (or no such qube);
-# 3 = ran the step but couldn't deliver output back to the work qube (contract
-# breach); 4 = refused to write through a symlink at the dom0 output path;
+# 3 = ran the step but couldn't complete or deliver its output (footer write
+# failed in dom0, or the ship-back failed; the dom0 copy is kept); 4 = refused
+# to write through a symlink at the dom0 output path;
 # 5 = target-guard refusal at dispatch (QCTL_TARGET declaration missing,
 # malformed, or not matching the dispatch target). By convention the in-script
 # runtime guard aborts with 9 (see SKILL.md "Target guard"), so a dispatch
@@ -355,10 +356,18 @@ chmod 600 "$DOM0_OUT" 2>/dev/null || true
 # Completion footer (see header). Written into the dom0 copy before shipping so
 # both copies carry it. If the step's last line had no trailing newline, start
 # the footer on its own line rather than gluing it to the step's output.
+# Both writes are checked: on a full dom0 filesystem the footer would be lost
+# while the byte-count check below, which compares against this same copy,
+# would still pass and ship a file without its completion status as success.
+footer_rc=0
 if [ -s "$DOM0_OUT" ] && [ "$(tail -c1 "$DOM0_OUT" | wc -l)" -eq 0 ]; then
-    echo >> "$DOM0_OUT"
+    echo >> "$DOM0_OUT" || footer_rc=1
 fi
-echo "[qctl] END step=${S} target=${VM} rc=${rc} version=${QCTL_VERSION} finished=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$DOM0_OUT"
+echo "[qctl] END step=${S} target=${VM} rc=${rc} version=${QCTL_VERSION} finished=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$DOM0_OUT" || footer_rc=1
+if [ "$footer_rc" -ne 0 ]; then
+    echo "[qctl] ERROR: could not append the completion footer to ${DOM0_OUT} (dom0 filesystem full?); not shipping. step rc was $rc; the footer-less dom0 copy is at ${DOM0_OUT}"
+    rm -f "$DOM0_TMP"; exit 3
+fi
 
 echo "[qctl] shipping output back to ${WORK}:${WORK_OUT}"
 # Deliver into a sibling .part file, verify its byte count against the dom0 copy,
