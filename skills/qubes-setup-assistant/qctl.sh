@@ -56,9 +56,11 @@
 #   QCTL_SRC_DIR    staging directory on the work qube holding <step>.sh and
 #                   receiving <step>.out (default: /tmp/qctl; an absolute path,
 #                   A-Za-z0-9._/-, no "..")
-#   QCTL_WORK_USER  if set, the pull and the ship-back run `qvm-run --user
-#                   <this user>` on the work qube (default: unset — the qube's
-#                   default user)
+#   QCTL_WORK_USER  if set, every qvm-run against the work qube (the prepare
+#                   step that moves the previous output aside, the pull and the
+#                   ship-back) runs `--user <this user>`; the account must own
+#                   the staging directory (default: unset — the qube's default
+#                   user)
 #
 # Install once in dom0 (pull from the work qube; no clipboard needed). The agent
 # stages qctl.sh into the staging dir first, alongside its step scripts.
@@ -158,8 +160,8 @@ case "$WORK"      in *[!A-Za-z0-9._-]*|'') echo "[qctl] ERROR: bad work qube '$W
 case "$SRC_DIR"   in *[!A-Za-z0-9._/-]*|''|*..*|[!/]*) echo "[qctl] ERROR: bad QCTL_SRC_DIR '$SRC_DIR' (must be an absolute path on the work qube; allowed: A-Za-z0-9._/-, no '..')"; exit 2 ;; esac
 case "$WORK_USER" in *[!A-Za-z0-9._-]*) echo "[qctl] ERROR: bad QCTL_WORK_USER '$WORK_USER' (allowed: A-Za-z0-9._-)"; exit 2 ;; esac
 
-# Every qvm-run against the WORK qube (pull and ship-back) goes through this
-# array, so --user lands on both or neither. --no-gui: these calls need no GUI
+# Every qvm-run against the WORK qube (prepare, pull and ship-back) goes
+# through this array, so --user lands on all of them or none. --no-gui: these calls need no GUI
 # session, and qvm-run's default wait (qubes.WaitForSession) is keyed on the
 # qube's *default* user regardless of --user (qubesadmin/tools/qvm_run.py sends
 # vm.default_user), so without the flag a headless work qube, or one whose GUI
