@@ -2,49 +2,99 @@
 # qctl — dom0 control-plane helper for agent-driven Qubes work.
 #
 #   qctl <target-vm|dom0> <step-name>
+#   qctl --version | -V          print the helper version and exit 0
+#   qctl --help | -h             print usage and exit 0
 #
-# Pulls /tmp/qctl/<step>.sh from the WORK qube (where the agent writes scripts),
-# runs it — as root inside <target-vm> (auto-starting it), or directly in dom0
-# when the target is the literal word "dom0" — and streams the combined output
-# back to /tmp/qctl/<step>.out on the WORK qube so the agent can read the result.
-# A dom0 copy is left at /tmp/qctl-<step>.out (mode 0600 — dom0 artifacts hold the
-# combined output of root-executed steps and stay private; the work-qube copy is
-# chmodded 0644 for the agent). qctl exits with the STEP's own exit status, so a
-# failed step is detectable when chaining many of them. Other exit codes are
-# distinct so $? is unambiguous: 1 = couldn't stage/pull the step script;
-# 2 = bad VM/step/work-qube name (or no such qube); 3 = ran the step but
-# couldn't deliver output back to the work qube (contract breach); 4 = refused
-# to write through a symlink at the dom0 output path; 5 = target-guard refusal
-# at dispatch (QCTL_TARGET declaration missing, malformed, or not matching the
-# dispatch target). By convention the in-script runtime guard aborts with 9
-# (see SKILL.md "Target guard"), so a dispatch refusal (5 — nothing ran) is
-# distinguishable from a runtime mismatch (9 — the step's own preamble fired).
+# Pulls <staging-dir>/<step>.sh from the WORK qube (where the agent writes
+# scripts; default staging dir /tmp/qctl, see QCTL_SRC_DIR below), runs it — as
+# root inside <target-vm> (auto-starting it), or directly in dom0 when the
+# target is the literal word "dom0" — appends a one-line completion footer, and
+# ships the combined output back to <staging-dir>/<step>.out on the WORK qube so
+# the agent can read the result. Delivery goes to a mktemp'd sibling
+# <step>.out.XXXXXX.part first; the byte count is checked against the dom0 copy
+# and the file is then renamed into place, so <step>.out is never partial (a
+# failed or short delivery removes the temp file and exits 3 with nothing
+# published).
+# A dom0 copy is left at /tmp/qctl-<step>.out (mode 0600 — dom0 artifacts hold
+# the combined output of root-executed steps and stay private; the work-qube
+# copy is chmodded 0644 for the agent in the default layout, 0600 under
+# QCTL_WORK_USER). qctl exits with the STEP's own exit status, so a failed step
+# is detectable when chaining many of them. Other exit codes are distinct so $?
+# is unambiguous: 1 = couldn't reach the work qube to prepare the staging
+# directory or pull the step script; 2 = wrong number of arguments, bad
+# VM/step/work-qube name, bad QCTL_SRC_DIR/QCTL_WORK_USER (or no such qube);
+# 3 = ran the step but couldn't complete or deliver its output (footer write
+# failed in dom0, or the ship-back failed; the dom0 copy is kept); 4 = refused
+# to write through a symlink at the dom0 output path;
+# 5 = target-guard refusal at dispatch (QCTL_TARGET declaration missing,
+# malformed, or not matching the dispatch target). By convention the in-script
+# runtime guard aborts with 9 (see SKILL.md "Target guard"), so a dispatch
+# refusal (5 — nothing ran) is distinguishable from a runtime mismatch (9 — the
+# step's own preamble fired).
+#
+# Previous output: qctl's first action on the work qube moves an existing
+# <step>.out to <step>.out.prev (one generation kept) and removes a stale
+# <step>.out.*.part, before the pull. After any dispatch that reached the work
+# qube, <step>.out therefore holds the new result or nothing — a re-dispatched
+# step, or one the target guard refused, never leaves an older run's footer
+# under the name the agent reads. (An agent that arms a watcher on the path
+# clears it itself first; see SKILL.md "Waiting for a step".)
+#
+# Completion footer: the last line of every shipped <step>.out is
+#   [qctl] END step=<step> target=<vm> rc=<n> version=<QCTL_VERSION> finished=<UTC>
+# The agent never sees qctl's exit status (that goes to the dom0 terminal), so
+# the footer carries rc into the file. It is also a uniform "the step is over"
+# marker: the file is shipped whole after the step exits, so on the work qube
+# <step>.out is either absent or complete — watch for the file, then read the
+# footer. No footer in the dom0 copy means the step is still running, was
+# interrupted, or the footer write itself failed (qctl then exits 3 and ships
+# nothing).
 #
 # Why this exists: dom0 has no clipboard in or out, and an agent in an app qube
 # can't reach dom0 at all. This turns every step into one short, reviewable
 # command the human runs in dom0, with results flowing back to the agent's qube
 # automatically — no hand-typing long `qvm-run` pipes, no transcribing output.
 #
+# Environment (read in dom0; each value is validated before use):
+#   QCTL_WORK       the work qube (default: work-qube)
+#   QCTL_SRC_DIR    staging directory on the work qube holding <step>.sh and
+#                   receiving <step>.out (default: /tmp/qctl; an absolute path,
+#                   A-Za-z0-9._/-, no "..")
+#   QCTL_WORK_USER  if set, every qvm-run against the work qube (the prepare
+#                   step that moves the previous output aside, the pull and the
+#                   ship-back) runs `--user <this user>`; the account must own
+#                   the staging directory (default: unset — the qube's default
+#                   user)
+#
 # Install once in dom0 (pull from the work qube; no clipboard needed). The agent
-# stages qctl.sh into /tmp/qctl/qctl.sh first, alongside its step scripts:
-#   qvm-run --pass-io <work-qube> 'cat /tmp/qctl/qctl.sh' </dev/null > ~/qctl && chmod +x ~/qctl
-# Set the work qube (defaults to QCTL_WORK or 'work-qube'):
+# stages qctl.sh into the staging dir first, alongside its step scripts.
+# Single-account work qube (agent = the qube's default user), default layout:
+#   qvm-run --no-gui --pass-io <work-qube> 'cat /tmp/qctl/qctl.sh' </dev/null > ~/qctl && chmod +x ~/qctl
 #   export QCTL_WORK=<work-qube>
+# Multi-account work qube (agent has its own 0700 home and is not the default
+# user) — stage in the agent's home and act as the agent; the install pull needs
+# the --user too because the helper itself sits in that home:
+#   export QCTL_WORK=<work-qube> QCTL_WORK_USER=<agent-user> QCTL_SRC_DIR=/home/<agent-user>/<project>/qctl
+#   qvm-run --no-gui --pass-io --user <agent-user> <work-qube> "cat $QCTL_SRC_DIR/qctl.sh" </dev/null > ~/qctl && chmod +x ~/qctl
+# Then `bash ~/qctl --version` and compare with QCTL_VERSION in the skill's copy.
 #
-# Cross-user /tmp hand-off: the agent runs `mkdir -p /tmp/qctl && chmod 1777
-# /tmp/qctl` once. Note the sticky bit (1777) only makes the *directory* writable
-# across users — it does NOT make the files inside readable across users; that
-# depends on each file's own mode. It works in practice because the default umask
-# (022) writes world-readable 0644 step files, and qctl chmods the output file
-# 0644 explicitly (below). If the agent runs with a restrictive umask it must
-# write <step>.sh mode 0644 so dom0's qvm-run — running as the qube's *default*
-# user — can read it.
+# Cross-user /tmp hand-off (the default layout): the agent runs `mkdir -p
+# /tmp/qctl && chmod 1777 /tmp/qctl` once. Note the sticky bit (1777) only makes
+# the *directory* writable across users — it does NOT make the files inside
+# readable across users; that depends on each file's own mode. It works in
+# practice because the default umask (022) writes world-readable 0644 step
+# files, and qctl chmods the output file 0644 explicitly (below). If the agent
+# runs with a restrictive umask it must write <step>.sh mode 0644 so dom0's
+# qvm-run — running as the qube's *default* user — can read it. /tmp is cleared
+# when the work qube restarts, taking every <step>.out with it; agent-home
+# staging (QCTL_SRC_DIR + QCTL_WORK_USER) avoids both the world-readable
+# directory and the loss.
 #
-# Review discipline: the agent pastes each <step>.sh in chat before you run it.
-# The script is executed from a tmpfile (in dom0, AND staged into a tmpfile
-# inside the target VM) with the step's own stdin redirected from /dev/null —
-# never piped to `bash` over stdin — so a heredoc or nested `qvm-run --pass-io`
-# inside a step can't drain the rest of the script stream.
+# Review discipline: the agent shows each <step>.sh (file or paste) before you
+# run it. The script is executed from a tmpfile (in dom0, AND staged into a
+# tmpfile inside the target VM) with the step's own stdin redirected from
+# /dev/null — never piped to `bash` over stdin — so a heredoc or nested
+# `qvm-run --pass-io` inside a step can't drain the rest of the script stream.
 #
 # Target guard (v2): every step must declare its intended target as the FIRST
 # executable line of the file (shebang/comments/blanks may precede it):
@@ -59,37 +109,107 @@
 # infrastructure targets: TemplateVMs, sys-* qubes, and net-providing qubes.
 # Naming an infrastructure qube explicitly IS allowed (template work is a
 # normal part of this skill) — qctl just announces it loudly before running.
+#
+# Changelog
+#   1.1.0  QCTL_SRC_DIR (absolute) and QCTL_WORK_USER (agent-home staging on
+#          multi-account work qubes; output shipped 0600 under a work user);
+#          --no-gui on every qvm-run (a qube whose X server is stuck, or a
+#          headless work qube, no longer hangs a step); --version/--help, exit 2
+#          on a usage error; BEGIN banner in dom0 and END footer in the shipped
+#          output; delivery via a mktemp'd <step>.out.*.part with a byte-count
+#          check and rename, so <step>.out is never partial; the previous
+#          output moves to <step>.out.prev before each run;
+#          tests/qctl-shim-test.sh.
+#   1.0.0  The script as shipped before versioning: target guard v2, tmpfile
+#          execution on both paths, distinct exit codes 1-5.
+QCTL_VERSION="1.1.0"
+
+usage() {
+    cat <<EOF
+usage: qctl <target-vm|dom0> <step-name>
+       qctl --version | -V
+       qctl --help | -h
+env:   QCTL_WORK=<work-qube>            (default: work-qube)
+       QCTL_SRC_DIR=<dir on work qube>  (default: /tmp/qctl)
+       QCTL_WORK_USER=<user on work qube>  (default: the qube's default user)
+EOF
+}
+case "${1:-}" in
+    --version|-V) echo "qctl $QCTL_VERSION"; exit 0 ;;
+    --help|-h)    usage; exit 0 ;;
+esac
+
 set -uo pipefail
 umask 077   # dom0-created files (the tmpfile + /tmp/qctl-<step>.out) hold root
             # step output; keep them private. The shipped-back work-qube copy is
-            # chmodded 0644 explicitly below, so this doesn't affect the agent.
+            # chmodded explicitly below (OUT_MODE), so this doesn't affect the
+            # agent.
 
 WORK="${QCTL_WORK:-work-qube}"
-VM="${1:?usage: qctl <target-vm|dom0> <step-name>}"
-S="${2:?usage: qctl <target-vm|dom0> <step-name>}"
+SRC_DIR="${QCTL_SRC_DIR:-/tmp/qctl}"
+WORK_USER="${QCTL_WORK_USER:-}"
+if [ "$#" -ne 2 ]; then usage >&2; exit 2; fi
+VM="$1"
+S="$2"
 
 # WORK, VM, and step name are all interpolated into paths, into mktemp patterns,
 # and into shell commands sent over qvm-run. Restrict them to a safe set so a
 # stray '/', quote, or whitespace can't break quoting or produce an invalid
-# mktemp template. WORK comes from the environment, so validate it too.
-case "$S"    in *[!A-Za-z0-9._-]*|'') echo "[qctl] ERROR: bad step name '$S' (allowed: A-Za-z0-9._-)"; exit 2 ;; esac
-case "$VM"   in *[!A-Za-z0-9._-]*|'') echo "[qctl] ERROR: bad VM name '$VM' (allowed: A-Za-z0-9._-)"; exit 2 ;; esac
-case "$WORK" in *[!A-Za-z0-9._-]*|'') echo "[qctl] ERROR: bad work qube '$WORK' (set QCTL_WORK; allowed: A-Za-z0-9._-)"; exit 2 ;; esac
+# mktemp template. WORK, SRC_DIR and WORK_USER come from the environment, so
+# validate them too: SRC_DIR must be absolute (a relative value would resolve
+# against whatever directory qrexec starts the remote shell in, silently), may
+# contain '/', and refuses '..'; WORK_USER may be empty (meaning: the work
+# qube's default user).
+case "$S"         in *[!A-Za-z0-9._-]*|'') echo "[qctl] ERROR: bad step name '$S' (allowed: A-Za-z0-9._-)"; exit 2 ;; esac
+case "$VM"        in *[!A-Za-z0-9._-]*|'') echo "[qctl] ERROR: bad VM name '$VM' (allowed: A-Za-z0-9._-)"; exit 2 ;; esac
+case "$WORK"      in *[!A-Za-z0-9._-]*|'') echo "[qctl] ERROR: bad work qube '$WORK' (set QCTL_WORK; allowed: A-Za-z0-9._-)"; exit 2 ;; esac
+case "$SRC_DIR"   in *[!A-Za-z0-9._/-]*|''|*..*|[!/]*) echo "[qctl] ERROR: bad QCTL_SRC_DIR '$SRC_DIR' (must be an absolute path on the work qube; allowed: A-Za-z0-9._/-, no '..')"; exit 2 ;; esac
+case "$WORK_USER" in *[!A-Za-z0-9._-]*) echo "[qctl] ERROR: bad QCTL_WORK_USER '$WORK_USER' (allowed: A-Za-z0-9._-)"; exit 2 ;; esac
 
-SRC="/tmp/qctl/${S}.sh"
-WORK_OUT="/tmp/qctl/${S}.out"
+# Every qvm-run against the WORK qube (prepare, pull and ship-back) goes
+# through this array, so --user lands on all of them or none. --no-gui: these
+# calls need no GUI session, and qvm-run's default wait (qubes.WaitForSession)
+# is keyed on the qube's *default* user regardless of --user
+# (qubesadmin/tools/qvm_run.py sends vm.default_user), so without the flag a
+# headless work qube, or one whose GUI agent is mid-restart, would hang the
+# pull.
+WORK_RUN=(qvm-run --no-gui --pass-io)
+[ -n "$WORK_USER" ] && WORK_RUN+=(--user "$WORK_USER")
+WORK_RUN+=("$WORK")
+# Mode of the shipped <step>.out: 0644 in the default layout, where the work
+# qube's default user writes a file that the agent (possibly another account)
+# must read; 0600 when QCTL_WORK_USER is set, since the agent then writes its
+# own file and nothing else needs to read it.
+OUT_MODE=0644
+[ -n "$WORK_USER" ] && OUT_MODE=0600
+
+SRC="${SRC_DIR}/${S}.sh"
+WORK_OUT="${SRC_DIR}/${S}.out"
 DOM0_TMP="$(mktemp "/tmp/qctl-${S}.XXXXXX.sh")" || { echo "[qctl] ERROR: mktemp failed in dom0"; exit 1; }
 DOM0_OUT="/tmp/qctl-${S}.out"
 
+# One line stating the effective configuration before anything runs, so a
+# wrong QCTL_* export is visible in the terminal rather than inferred from a
+# failed pull.
+echo "[qctl] BEGIN v${QCTL_VERSION} target=${VM} step=${S} work=${WORK} user=${WORK_USER:-default} src=${SRC_DIR}"
+# Move this step's previous output aside before anything else happens on the
+# work qube (see header, "Previous output"). Done before the pull so that even a
+# dispatch that fails at the pull or at the target guard leaves no stale
+# <step>.out behind. `a || b && c` groups as `(a || b) && c`, so a failed mv
+# fails the whole command and is reported.
+if ! "${WORK_RUN[@]}" "[ ! -e '${WORK_OUT}' ] || mv -f '${WORK_OUT}' '${WORK_OUT}.prev' && rm -f '${WORK_OUT}.'*'.part'" </dev/null; then
+    echo "[qctl] ERROR: could not prepare ${WORK}:${SRC_DIR} (move a previous ${S}.out aside): is ${WORK} running, is qrexec allowed, and does ${WORK_USER:-the default user} own that directory?"
+    rm -f "$DOM0_TMP"; exit 1
+fi
 echo "[qctl] pulling ${WORK}:${SRC}"
 # --pass-io propagates the remote `cat` exit status, so a non-zero here means the
 # pull itself failed (work qube down, qrexec denied, or the file doesn't exist) —
 # distinct from "pulled fine but the file was empty". Report the two separately so
 # the error isn't the misleading "did the agent write it yet?" in the wrong case.
 pull_rc=0
-qvm-run --pass-io "$WORK" "cat '$SRC'" </dev/null > "$DOM0_TMP" || pull_rc=$?
+"${WORK_RUN[@]}" "cat '$SRC'" </dev/null > "$DOM0_TMP" || pull_rc=$?
 if [ "$pull_rc" -ne 0 ]; then
-    echo "[qctl] ERROR: could not pull ${SRC} from ${WORK} (qvm-run exit $pull_rc): is ${WORK} running, is qrexec allowed, and does the file exist?"
+    echo "[qctl] ERROR: could not pull ${SRC} from ${WORK} (qvm-run exit $pull_rc): is ${WORK} running, is qrexec allowed, does the file exist, and can ${WORK_USER:-the default user} read it?"
     rm -f "$DOM0_TMP"; exit 1
 fi
 if [ ! -s "$DOM0_TMP" ]; then
@@ -228,19 +348,55 @@ else
     # `qvm-run --pass-io` inside the step consume the rest of the script.
     # --pass-io propagates the remote command's exit status, so $? here is the
     # step's own exit code.
-    qvm-run --pass-io --user root "$VM" \
+    # --no-gui: do not wait for the qube's X session first. qvm-run's default
+    # WaitForSession blocks until the in-qube X server is up, which never
+    # happens on a qube whose X server is stuck (e.g. a GPU qube whose modeset
+    # init failed); the step would then hang forever with no output, looking
+    # like a dead qrexec. A root shell running a script needs no session.
+    qvm-run --no-gui --pass-io --user root "$VM" \
         'T=$(mktemp /tmp/.qctl-step.XXXXXX.sh); cat > "$T"; bash "$T" </dev/null; rc=$?; rm -f "$T"; exit $rc' \
         < "$DOM0_TMP" > "$DOM0_OUT" 2>&1 || rc=$?
 fi
 chmod 600 "$DOM0_OUT" 2>/dev/null || true
 
+# Completion footer (see header). Written into the dom0 copy before shipping so
+# both copies carry it. If the step's last line had no trailing newline, start
+# the footer on its own line rather than gluing it to the step's output.
+# Both writes are checked: on a full dom0 filesystem the footer would be lost
+# while the byte-count check below, which compares against this same copy,
+# would still pass and ship a file without its completion status as success.
+footer_rc=0
+if [ -s "$DOM0_OUT" ] && [ "$(tail -c1 "$DOM0_OUT" | wc -l)" -eq 0 ]; then
+    echo >> "$DOM0_OUT" || footer_rc=1
+fi
+echo "[qctl] END step=${S} target=${VM} rc=${rc} version=${QCTL_VERSION} finished=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$DOM0_OUT" || footer_rc=1
+if [ "$footer_rc" -ne 0 ]; then
+    echo "[qctl] ERROR: could not append the completion footer to ${DOM0_OUT} (dom0 filesystem full?); not shipping. step rc was $rc; the footer-less dom0 copy is at ${DOM0_OUT}"
+    rm -f "$DOM0_TMP"; exit 3
+fi
+
 echo "[qctl] shipping output back to ${WORK}:${WORK_OUT}"
-# `cat && chmod` (not `;`) so a failed/partial write isn't masked by a successful
-# chmod; chmod 0644 lets the agent read it regardless of the work qube default
-# user's umask (the cross-user hand-off caveat in the header). Capture the ship
-# status — delivery is qctl's contract, so a failure here must not look like success.
+# Deliver into a sibling file that mktemp creates on the work qube —
+# O_CREAT|O_EXCL, mode 0600, unpredictable name <step>.out.XXXXXX.part — verify
+# its byte count against the dom0 copy, set the mode, then rename into place.
+# rename(2) is atomic within one filesystem, so <step>.out never exists in a
+# partial state and a watcher that wakes on its creation reads the complete
+# file; it also replaces whatever sits at <step>.out rather than writing into
+# it. The size check, not cat's exit status, decides publication: cat exits 0
+# on a stream cut short (EOF is EOF), e.g. when qctl is interrupted
+# mid-transfer. A failed or short delivery removes the temp file and leaves
+# nothing under the watched name. mktemp is what makes the create exclusive
+# and private: nothing planted in a shared staging directory — a loose-mode
+# file, a symlink, a FIFO with a reader — can receive the bytes, because the
+# name is not known in advance and an existing name is never opened (dom0's
+# umask does not cross qrexec, and a chmod after the bytes cannot revoke a
+# read that already happened). The explicit chmod (OUT_MODE, above) then
+# publishes the documented mode, 0644 in the default layout.
+# Capture the ship status — delivery is qctl's contract, so a failure here must
+# not look like success.
+OUT_SIZE="$(wc -c < "$DOM0_OUT")"
 ship_rc=0
-qvm-run --pass-io "$WORK" "cat > '$WORK_OUT' && chmod 0644 '$WORK_OUT'" < "$DOM0_OUT" || ship_rc=$?
+"${WORK_RUN[@]}" "P=\$(mktemp '${WORK_OUT}.XXXXXX.part') && cat > \"\$P\" && [ \"\$(wc -c < \"\$P\")\" -eq ${OUT_SIZE} ] && chmod ${OUT_MODE} \"\$P\" && mv -f \"\$P\" '${WORK_OUT}' || { rm -f \"\$P\"; exit 1; }" < "$DOM0_OUT" || ship_rc=$?
 rm -f "$DOM0_TMP"
 if [ "$ship_rc" -ne 0 ]; then
     echo "[qctl] ERROR: failed to ship output back to ${WORK}:${WORK_OUT} (rc=$ship_rc); step rc was $rc. dom0 copy: ${DOM0_OUT}"
