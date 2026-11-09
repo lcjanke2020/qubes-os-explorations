@@ -139,7 +139,8 @@ esac
 set -uo pipefail
 umask 077   # dom0-created files (the tmpfile + /tmp/qctl-<step>.out) hold root
             # step output; keep them private. The shipped-back work-qube copy is
-            # chmodded explicitly below (OUT_MODE), so this doesn't affect the agent.
+            # chmodded explicitly below (OUT_MODE), so this doesn't affect the
+            # agent.
 
 WORK="${QCTL_WORK:-work-qube}"
 SRC_DIR="${QCTL_SRC_DIR:-/tmp/qctl}"
@@ -163,11 +164,12 @@ case "$SRC_DIR"   in *[!A-Za-z0-9._/-]*|''|*..*|[!/]*) echo "[qctl] ERROR: bad Q
 case "$WORK_USER" in *[!A-Za-z0-9._-]*) echo "[qctl] ERROR: bad QCTL_WORK_USER '$WORK_USER' (allowed: A-Za-z0-9._-)"; exit 2 ;; esac
 
 # Every qvm-run against the WORK qube (prepare, pull and ship-back) goes
-# through this array, so --user lands on all of them or none. --no-gui: these calls need no GUI
-# session, and qvm-run's default wait (qubes.WaitForSession) is keyed on the
-# qube's *default* user regardless of --user (qubesadmin/tools/qvm_run.py sends
-# vm.default_user), so without the flag a headless work qube, or one whose GUI
-# agent is mid-restart, would hang the pull.
+# through this array, so --user lands on all of them or none. --no-gui: these
+# calls need no GUI session, and qvm-run's default wait (qubes.WaitForSession)
+# is keyed on the qube's *default* user regardless of --user
+# (qubesadmin/tools/qvm_run.py sends vm.default_user), so without the flag a
+# headless work qube, or one whose GUI agent is mid-restart, would hang the
+# pull.
 WORK_RUN=(qvm-run --no-gui --pass-io)
 [ -n "$WORK_USER" ] && WORK_RUN+=(--user "$WORK_USER")
 WORK_RUN+=("$WORK")
@@ -183,8 +185,9 @@ WORK_OUT="${SRC_DIR}/${S}.out"
 DOM0_TMP="$(mktemp "/tmp/qctl-${S}.XXXXXX.sh")" || { echo "[qctl] ERROR: mktemp failed in dom0"; exit 1; }
 DOM0_OUT="/tmp/qctl-${S}.out"
 
-# One line stating the effective configuration before anything runs, so a wrong
-# QCTL_* export is visible in the terminal rather than inferred from a failed pull.
+# One line stating the effective configuration before anything runs, so a
+# wrong QCTL_* export is visible in the terminal rather than inferred from a
+# failed pull.
 echo "[qctl] BEGIN v${QCTL_VERSION} target=${VM} step=${S} work=${WORK} user=${WORK_USER:-default} src=${SRC_DIR}"
 # Move this step's previous output aside before anything else happens on the
 # work qube (see header, "Previous output"). Done before the pull so that even a
