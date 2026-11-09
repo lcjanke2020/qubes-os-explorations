@@ -54,8 +54,8 @@
 # Environment (read in dom0; each value is validated before use):
 #   QCTL_WORK       the work qube (default: work-qube)
 #   QCTL_SRC_DIR    staging directory on the work qube holding <step>.sh and
-#                   receiving <step>.out (default: /tmp/qctl; A-Za-z0-9._/-,
-#                   no "..")
+#                   receiving <step>.out (default: /tmp/qctl; an absolute path,
+#                   A-Za-z0-9._/-, no "..")
 #   QCTL_WORK_USER  if set, the pull and the ship-back run `qvm-run --user
 #                   <this user>` on the work qube (default: unset — the qube's
 #                   default user)
@@ -144,12 +144,14 @@ S="$2"
 # and into shell commands sent over qvm-run. Restrict them to a safe set so a
 # stray '/', quote, or whitespace can't break quoting or produce an invalid
 # mktemp template. WORK, SRC_DIR and WORK_USER come from the environment, so
-# validate them too: SRC_DIR additionally allows '/' (it is a path) but refuses
-# '..'; WORK_USER may be empty (meaning: the work qube's default user).
+# validate them too: SRC_DIR must be absolute (a relative value would resolve
+# against whatever directory qrexec starts the remote shell in, silently), may
+# contain '/', and refuses '..'; WORK_USER may be empty (meaning: the work
+# qube's default user).
 case "$S"         in *[!A-Za-z0-9._-]*|'') echo "[qctl] ERROR: bad step name '$S' (allowed: A-Za-z0-9._-)"; exit 2 ;; esac
 case "$VM"        in *[!A-Za-z0-9._-]*|'') echo "[qctl] ERROR: bad VM name '$VM' (allowed: A-Za-z0-9._-)"; exit 2 ;; esac
 case "$WORK"      in *[!A-Za-z0-9._-]*|'') echo "[qctl] ERROR: bad work qube '$WORK' (set QCTL_WORK; allowed: A-Za-z0-9._-)"; exit 2 ;; esac
-case "$SRC_DIR"   in *[!A-Za-z0-9._/-]*|''|*..*) echo "[qctl] ERROR: bad QCTL_SRC_DIR '$SRC_DIR' (allowed: A-Za-z0-9._/-, no '..')"; exit 2 ;; esac
+case "$SRC_DIR"   in *[!A-Za-z0-9._/-]*|''|*..*|[!/]*) echo "[qctl] ERROR: bad QCTL_SRC_DIR '$SRC_DIR' (must be an absolute path on the work qube; allowed: A-Za-z0-9._/-, no '..')"; exit 2 ;; esac
 case "$WORK_USER" in *[!A-Za-z0-9._-]*) echo "[qctl] ERROR: bad QCTL_WORK_USER '$WORK_USER' (allowed: A-Za-z0-9._-)"; exit 2 ;; esac
 
 # Every qvm-run against the WORK qube (pull and ship-back) goes through this

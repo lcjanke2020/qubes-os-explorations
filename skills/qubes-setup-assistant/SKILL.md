@@ -82,7 +82,7 @@ Model:
 | Variable | Default | Meaning |
 |---|---|---|
 | `QCTL_WORK` | `work-qube` | The work qube the agent runs in. |
-| `QCTL_SRC_DIR` | `/tmp/qctl` | Directory on the work qube that holds `<step>.sh` and receives `<step>.out`. `A-Za-z0-9._/-`, no `..`. |
+| `QCTL_SRC_DIR` | `/tmp/qctl` | Absolute path of the directory on the work qube that holds `<step>.sh` and receives `<step>.out`. `A-Za-z0-9._/-`, no `..`; a relative value is refused, since the pull would resolve it against whatever directory qrexec starts in. |
 | `QCTL_WORK_USER` | *(unset: the qube's default user)* | If set, the pull and the ship-back run `qvm-run --user <this user>` on the work qube. |
 
 **Staging directory — match the layout to the account the agent runs as.**
